@@ -158,12 +158,23 @@ interface TileRow {
 interface TileStatements {
   select: StatementSync;
   insert: StatementSync;
+  pin: StatementSync;
 }
+
+/** Tiles removed per statement when the cache is over its limit. */
+const EVICT_BATCH = 500;
+/** Batches removed before yielding to the event loop, so a lowered limit never stalls tile serving. */
+const EVICT_BATCHES_PER_TURN = 4;
+/** A catalog id, which names its tile file; the published schema allows nothing else. */
+const CATALOG_ID = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
 /**
  * One MBTiles file per catalog entry. Rows are stored in TMS order as the
  * MBTiles spec requires, so the file is a valid chart in its own right; the
- * extra `fetched_at` column only decides when a tile is refreshed.
+ * extra `fetched_at` column decides when a tile is refreshed and which go
+ * first when the cache is full, and `pinned` marks the tiles of an area
+ * download, which the limit never removes: the user asked for that area to
+ * work offshore.
  */
 
 export class OnlineTileStore {
@@ -171,12 +182,23 @@ export class OnlineTileStore {
   // Prepared once per file: get and put run for every tile a plotter asks for.
   private readonly statements = new Map<string, TileStatements>();
   private closed = false;
+  private writtenSinceCheck = 0;
+  private evictionQueued = false;
 
-  constructor(private readonly dir: string) {}
+  /** `limitBytes` 0 keeps every tile. */
+  constructor(
+    private readonly dir: string,
+    private limitBytes = 0
+  ) {}
+
+  setLimit(limitBytes: number): void {
+    this.limitBytes = limitBytes;
+    this.queueEviction();
+  }
 
   private file(catalogId: string): string {
     // The id names a file; the published schema allows nothing else.
-    if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(catalogId)) {
+    if (!CATALOG_ID.test(catalogId)) {
       throw new Error(`Invalid catalog id for an offline chart: ${catalogId}`);
     }
     return path.join(this.dir, `${catalogId}.mbtiles`);
@@ -189,6 +211,12 @@ export class OnlineTileStore {
       const file = this.file(catalogId);
       db = new DatabaseSync(file);
       try {
+        // A new file gives evicted pages back to the disk. One kept from
+        // before the limit is not rebuilt, since VACUUM would stall the server
+        // and need a second copy's space; it reuses its free pages instead.
+        if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table'").get()) {
+          db.exec('PRAGMA auto_vacuum = INCREMENTAL');
+        }
         db.exec(`
           PRAGMA journal_mode = WAL;
           CREATE TABLE IF NOT EXISTS metadata (name TEXT PRIMARY KEY, value TEXT);
@@ -198,9 +226,15 @@ export class OnlineTileStore {
             tile_row INTEGER NOT NULL,
             tile_data BLOB NOT NULL,
             fetched_at INTEGER,
+            pinned INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (zoom_level, tile_column, tile_row)
           );
         `);
+        const columns = db.prepare('PRAGMA table_info(tiles)').all() as { name: string }[];
+        if (!columns.some((c) => c.name === 'pinned')) {
+          db.exec('ALTER TABLE tiles ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0');
+        }
+        db.exec('CREATE INDEX IF NOT EXISTS tiles_by_age ON tiles (pinned, fetched_at)');
         db.prepare('INSERT OR IGNORE INTO metadata (name, value) VALUES (?, ?)').run(
           'name',
           catalogId
@@ -237,8 +271,17 @@ export class OnlineTileStore {
         select: db.prepare(
           'SELECT tile_data, fetched_at FROM tiles WHERE zoom_level = ? AND tile_column = ? AND tile_row = ?'
         ),
+        // A refresh while browsing must not unpin a tile an area download kept.
         insert: db.prepare(
-          'INSERT OR REPLACE INTO tiles (zoom_level, tile_column, tile_row, tile_data, fetched_at) VALUES (?, ?, ?, ?, ?)'
+          `INSERT INTO tiles (zoom_level, tile_column, tile_row, tile_data, fetched_at, pinned)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT (zoom_level, tile_column, tile_row) DO UPDATE SET
+             tile_data = excluded.tile_data,
+             fetched_at = excluded.fetched_at,
+             pinned = MAX(pinned, excluded.pinned)`
+        ),
+        pin: db.prepare(
+          'UPDATE tiles SET pinned = 1 WHERE zoom_level = ? AND tile_column = ? AND tile_row = ?'
         )
       };
       this.statements.set(catalogId, statements);
@@ -263,12 +306,42 @@ export class OnlineTileStore {
     };
   }
 
-  put(catalogId: string, z: number, x: number, y: number, data: Uint8Array, now: number): void {
+  put(
+    catalogId: string,
+    z: number,
+    x: number,
+    y: number,
+    data: Uint8Array,
+    now: number,
+    pinned = false
+  ): void {
     // A fetch still in flight when the plugin stopped must not reopen a file.
     if (this.closed) {
       return;
     }
-    this.tileStatements(catalogId).insert.run(z, x, 2 ** z - 1 - y, data, now);
+    this.tileStatements(catalogId).insert.run(z, x, 2 ** z - 1 - y, data, now, pinned ? 1 : 0);
+    this.writtenSinceCheck += data.byteLength;
+    // Measuring every file costs a few queries; once per 1/50th of the limit
+    // keeps the overshoot small without doing it for every tile.
+    if (this.limitBytes > 0 && this.writtenSinceCheck >= this.limitBytes / 50) {
+      this.queueEviction();
+    }
+  }
+
+  /** Keep a tile out of the limit's reach, for an area download. */
+  pin(catalogId: string, z: number, x: number, y: number): void {
+    if (this.closed) {
+      return;
+    }
+    this.tileStatements(catalogId).pin.run(z, x, 2 ** z - 1 - y);
+  }
+
+  /** Whether any tile is kept for a chart. */
+  hasTiles(catalogId: string): boolean {
+    if (this.closed || !CATALOG_ID.test(catalogId) || !fs.existsSync(this.file(catalogId))) {
+      return false;
+    }
+    return this.db(catalogId).prepare('SELECT 1 FROM tiles LIMIT 1').get() !== undefined;
   }
 
   /** How many tiles are kept for a chart and how much space they take. */
@@ -280,6 +353,177 @@ export class OnlineTileStore {
       .prepare('SELECT COUNT(*) AS tiles, COALESCE(SUM(LENGTH(tile_data)), 0) AS bytes FROM tiles')
       .get() as { tiles: number; bytes: number };
     return { tiles: row.tiles, bytes: row.bytes };
+  }
+
+  /** The space every kept chart takes, in bytes; free pages a later tile reuses are not counted. */
+  totalBytes(): number {
+    if (this.closed) {
+      return 0;
+    }
+    return this.catalogIds().reduce((sum, id) => sum + this.usedBytes(this.db(id)), 0);
+  }
+
+  private catalogIds(): string[] {
+    let names: string[];
+    try {
+      names = fs.readdirSync(this.dir);
+    } catch {
+      return [];
+    }
+    return names
+      .filter((n) => n.endsWith('.mbtiles'))
+      .map((n) => n.slice(0, -'.mbtiles'.length))
+      .filter((id) => CATALOG_ID.test(id));
+  }
+
+  private usedBytes(db: DatabaseSync): number {
+    return (
+      (pragmaValue(db, 'page_count') - pragmaValue(db, 'freelist_count')) *
+      pragmaValue(db, 'page_size')
+    );
+  }
+
+  private queueEviction(): void {
+    if (this.evictionQueued) {
+      return;
+    }
+    this.evictionQueued = true;
+    setImmediate(() => {
+      this.evictionQueued = false;
+      try {
+        if (this.evict()) {
+          this.queueEviction();
+        }
+      } catch {
+        // A damaged file must not stop tiles being served; the next check tries again.
+      }
+    });
+  }
+
+  /**
+   * Remove the longest-kept tiles that no area download asked for, across
+   * every chart, until the cache fits its limit. Returns true when it
+   * stopped only to yield and more remains to remove.
+   */
+  evict(): boolean {
+    this.writtenSinceCheck = 0;
+    if (this.closed || this.limitBytes <= 0) {
+      return false;
+    }
+    // A damaged file is left out rather than turning the limit off for every chart.
+    const files = this.catalogIds().flatMap((id) => {
+      try {
+        return [{ id, db: this.db(id) }];
+      } catch {
+        return [];
+      }
+    });
+    const more = this.removeOldest(files);
+    return this.reclaim(files) || more;
+  }
+
+  /**
+   * Give the pages of removed tiles back to the disk, a bounded amount per
+   * turn across all charts so a large cache never holds up tile requests.
+   * Returns true when pages are left for a later turn.
+   */
+  private reclaim(files: { id: string; db: DatabaseSync }[]): boolean {
+    let budget = VACUUM_PAGES_PER_TURN;
+    let left = false;
+    for (const f of files) {
+      try {
+        if (pragmaValue(f.db, 'auto_vacuum') !== AUTO_VACUUM_INCREMENTAL) {
+          continue;
+        }
+        const free = pragmaValue(f.db, 'freelist_count');
+        if (free === 0) {
+          continue;
+        }
+        if (budget === 0) {
+          return true;
+        }
+        const pages = Math.min(free, budget);
+        f.db.exec(`PRAGMA incremental_vacuum(${String(pages)})`);
+        f.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+        budget -= pages;
+        left ||= pragmaValue(f.db, 'freelist_count') > 0;
+      } catch {
+        // A damaged file must not stop the other charts getting their space back.
+      }
+    }
+    return left;
+  }
+
+  private removeOldest(files: { id: string; db: DatabaseSync }[]): boolean {
+    const used = new Map(files.map((f) => [f.id, this.usedBytes(f.db)]));
+    let total = [...used.values()].reduce((a, b) => a + b, 0);
+    let live = files;
+    for (let batch = 0; total > this.limitBytes; batch++) {
+      if (batch === EVICT_BATCHES_PER_TURN) {
+        return true;
+      }
+      // The oldest unpinned tiles of every chart, merged by age, and only as
+      // many as the overshoot takes, so the limit is not undercut.
+      const candidates = live
+        .flatMap((f) => {
+          try {
+            return (
+              f.db
+                .prepare(
+                  'SELECT rowid AS id, LENGTH(tile_data) AS bytes, fetched_at AS at FROM tiles WHERE pinned = 0 ORDER BY fetched_at LIMIT ?'
+                )
+                .all(EVICT_BATCH) as { id: number; bytes: number; at: number | null }[]
+            ).map((c) => ({ ...c, file: f }));
+          } catch {
+            // A file that opens but cannot be read must not stop eviction in the others.
+            // Its space cannot be freed, so it does not count against the limit either.
+            live = live.filter((l) => l !== f);
+            total -= used.get(f.id) ?? 0;
+            return [];
+          }
+        })
+        .sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
+      if (total <= this.limitBytes) {
+        return false;
+      }
+      if (candidates.length === 0) {
+        // Only area downloads are left; they stay whatever the limit.
+        return false;
+      }
+      const doomed = new Map<string, number[]>();
+      let freed = 0;
+      for (const c of candidates.slice(0, EVICT_BATCH)) {
+        const ids = doomed.get(c.file.id) ?? [];
+        ids.push(c.id);
+        doomed.set(c.file.id, ids);
+        freed += c.bytes;
+        if (freed >= total - this.limitBytes) {
+          break;
+        }
+      }
+      for (const f of live) {
+        const ids = doomed.get(f.id);
+        if (!ids) {
+          continue;
+        }
+        const remove = f.db.prepare('DELETE FROM tiles WHERE rowid = ?');
+        f.db.exec('BEGIN');
+        try {
+          for (const id of ids) {
+            remove.run(id);
+          }
+          f.db.exec('COMMIT');
+        } catch (err) {
+          f.db.exec('ROLLBACK');
+          throw err;
+        }
+        const before = used.get(f.id) ?? 0;
+        const after = this.usedBytes(f.db);
+        used.set(f.id, after);
+        total -= before - after;
+      }
+    }
+    return false;
   }
 
   /** Drop every tile kept for a chart. */
@@ -303,6 +547,13 @@ export class OnlineTileStore {
   }
 }
 
+const AUTO_VACUUM_INCREMENTAL = 2;
+// 4 MB of 4 KB pages: enough to keep pace with eviction, small enough not to stall a turn.
+const VACUUM_PAGES_PER_TURN = 1024;
+
+function pragmaValue(db: DatabaseSync, name: string): number {
+  return (db.prepare(`PRAGMA ${name}`).get() as Record<string, number>)[name] ?? 0;
+}
 const SQLITE_CORRUPT = 11;
 const SQLITE_NOTADB = 26;
 
@@ -456,13 +707,20 @@ export class OnlineTileProxy {
     }
     const cached = this.store.get(catalogId, z, x, y);
     if (cached && this.now() - cached.fetchedAt < TILE_REFRESH_MS) {
+      this.store.pin(catalogId, z, x, y);
       return 'kept';
     }
-    const data = await this.fetchAndKeep(catalogId, source, z, x, y);
-    if (data === 'absent') {
-      return 'none';
+    const data = await this.fetchAndKeep(catalogId, source, z, x, y, true);
+    if (!data || data === 'absent') {
+      // An old copy is still part of the area the user asked to keep.
+      if (cached) {
+        this.store.pin(catalogId, z, x, y);
+      }
+      return data === 'absent' ? 'none' : 'failed';
     }
-    return data ? 'fetched' : 'failed';
+    // The fetch may have been one a plotter started, which keeps it unpinned.
+    this.store.pin(catalogId, z, x, y);
+    return 'fetched';
   }
 
   /**
@@ -486,7 +744,8 @@ export class OnlineTileProxy {
     source: OnlineTileSource,
     z: number,
     x: number,
-    y: number
+    y: number,
+    pinned = false
   ): Promise<Buffer | 'absent' | null> {
     const url = upstreamTileUrl(source, z, x, y);
     if (!url) {
@@ -506,7 +765,7 @@ export class OnlineTileProxy {
         }
         if ((this.generation.get(catalogId) ?? 0) === generation) {
           try {
-            this.store.put(catalogId, z, x, y, data, this.now());
+            this.store.put(catalogId, z, x, y, data, this.now(), pinned);
           } catch {
             // A full disk must not stop the chart showing while online.
           }

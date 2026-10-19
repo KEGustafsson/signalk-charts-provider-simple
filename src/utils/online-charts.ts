@@ -379,31 +379,41 @@ export interface OnlineChartFileRef {
 /** Every online chart file under `basePath`, for the catalog's "Added" state. */
 export async function findOnlineChartFiles(
   basePath: string,
-  currentPath: string = basePath
+  currentPath: string = basePath,
+  { strict = false }: { strict?: boolean } = {}
 ): Promise<OnlineChartFileRef[]> {
   const found: OnlineChartFileRef[] = [];
   let entries: fs.Dirent[];
   try {
     entries = await fs.promises.readdir(currentPath, { withFileTypes: true });
-  } catch {
+  } catch (err) {
+    // A folder that cannot be read may still hold a chart file; callers that
+    // delete what no file uses must not take that for "none".
+    if (strict) {
+      throw err;
+    }
     return found;
   }
   for (const entry of entries) {
     const fullPath = path.join(currentPath, entry.name);
     if (entry.isDirectory()) {
       // A tile directory is a chart, not a folder; walking its thousands of
-      // tile files would only cost time.
+      // tile files would only cost time. lost+found belongs to the file system
+      // of a card used as the chart folder, and the plugin may not read it.
       if (
         !entry.name.startsWith('.') &&
         entry.name !== 'node_modules' &&
+        entry.name !== 'lost+found' &&
         !isTileDirectory(fullPath)
       ) {
-        found.push(...(await findOnlineChartFiles(basePath, fullPath)));
+        found.push(...(await findOnlineChartFiles(basePath, fullPath, { strict })));
       }
     } else if (entry.isFile() && isOnlineChartFile(entry.name)) {
       const file = readOnlineChartFile(fullPath);
       if (file) {
         found.push({ relativePath: path.relative(basePath, fullPath), catalogId: file.catalogId });
+      } else if (strict) {
+        throw new Error(`Cannot read the online chart file ${fullPath}`);
       }
     }
   }

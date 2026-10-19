@@ -248,6 +248,44 @@ describe('online charts', () => {
       assert.ok(!refs.some((r) => r.relativePath.startsWith('some-chart')));
     });
 
+    it('findOnlineChartFiles fails on a folder it cannot read only when asked to', async () => {
+      const missing = path.join(dir, 'unmounted');
+      assert.deepStrictEqual(await findOnlineChartFiles(missing), []);
+      await assert.rejects(findOnlineChartFiles(missing, missing, { strict: true }));
+      const broken = path.join(dir, 'broken');
+      fs.mkdirSync(broken);
+      fs.writeFileSync(path.join(broken, 'x.onlinechart.json'), 'not json');
+      assert.deepStrictEqual(await findOnlineChartFiles(broken), []);
+      await assert.rejects(findOnlineChartFiles(broken, broken, { strict: true }));
+    });
+
+    it('findOnlineChartFiles skips lost+found but no other folder it may not enter', async (t) => {
+      const base = path.join(dir, 'card');
+      const lost = path.join(base, 'lost+found');
+      const locked = path.join(base, 'Locked');
+      fs.mkdirSync(lost, { recursive: true });
+      fs.writeFileSync(
+        path.join(base, 'radar.onlinechart.json'),
+        '{"catalogId":"radar","name":"Radar"}'
+      );
+      const readdir = fs.promises.readdir.bind(fs.promises);
+      // Root ignores directory permissions, so the denial is simulated.
+      const denied = new Set([lost, locked]);
+      t.mock.method(fs.promises, 'readdir', (p: fs.PathLike, ...rest: unknown[]) => {
+        if (denied.has(String(p))) {
+          return Promise.reject(Object.assign(new Error('denied'), { code: 'EACCES' }));
+        }
+        return (readdir as (...a: unknown[]) => Promise<unknown>)(p, ...rest);
+      });
+      const refs = await findOnlineChartFiles(base, base, { strict: true });
+      assert.deepStrictEqual(
+        refs.map((r) => r.catalogId),
+        ['radar']
+      );
+      fs.mkdirSync(locked);
+      await assert.rejects(findOnlineChartFiles(base, base, { strict: true }));
+    });
+
     it('findOnlineChartFiles reports catalog ids and paths', async () => {
       const refs = (await findOnlineChartFiles(dir)).sort((a, b) =>
         a.catalogId < b.catalogId ? -1 : 1

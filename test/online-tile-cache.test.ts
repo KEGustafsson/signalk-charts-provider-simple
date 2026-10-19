@@ -399,3 +399,213 @@ describe('OnlineTileStore and OnlineTileProxy', () => {
     assert.deepStrictEqual(new Uint8Array(store.get('depths', 5, 2, 2)?.data ?? []), PNG2);
   });
 });
+
+describe('OnlineTileStore limit', () => {
+  let dir: string;
+  let store: OnlineTileStore;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'online-limit-'));
+  });
+
+  afterEach(() => {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** A tile big enough to fill its own pages, so freeing it frees space. */
+  function tile(seed: number): Uint8Array {
+    const data = new Uint8Array(20_000).fill(seed);
+    data.set(PNG.subarray(0, 8));
+    return data;
+  }
+
+  it('removes the tiles kept longest, across charts, until the cache fits', () => {
+    store = new OnlineTileStore(dir);
+    for (let i = 0; i < 20; i++) {
+      store.put(i % 2 ? 'depths' : 'harbours', 10, i, 0, tile(i), 1000 + i);
+    }
+    const before = store.totalBytes();
+    store.setLimit(Math.floor(before / 2));
+    store.evict();
+    assert.ok(store.totalBytes() <= before / 2);
+    // The oldest are gone from both charts and the newest kept.
+    assert.strictEqual(store.get('harbours', 10, 0, 0), null);
+    assert.strictEqual(store.get('depths', 10, 1, 0), null);
+    assert.ok(store.get('depths', 10, 19, 0));
+    assert.ok(store.get('harbours', 10, 18, 0));
+    // Not far below the limit either: about half the tiles stay.
+    const left = Array.from({ length: 20 }, (_, i) =>
+      store.get(i % 2 ? 'depths' : 'harbours', 10, i, 0)
+    ).filter(Boolean).length;
+    assert.ok(left >= 7 && left <= 10, `${String(left)} tiles left`);
+  });
+
+  it('never removes the tiles of an area download, even when browsing refreshes them', () => {
+    store = new OnlineTileStore(dir);
+    store.put('depths', 10, 0, 0, tile(1), 1000, true);
+    store.put('depths', 10, 1, 0, tile(2), 1001);
+    store.pin('depths', 10, 1, 0);
+    store.put('depths', 10, 1, 0, tile(3), 5000);
+    store.put('depths', 10, 2, 0, tile(4), 2000);
+    store.setLimit(1);
+    assert.strictEqual(store.evict(), false);
+    assert.ok(store.get('depths', 10, 0, 0));
+    assert.ok(store.get('depths', 10, 1, 0));
+    assert.strictEqual(store.get('depths', 10, 2, 0), null);
+  });
+
+  it('keeps everything without a limit', () => {
+    store = new OnlineTileStore(dir);
+    store.put('depths', 10, 0, 0, tile(1), 1000);
+    store.evict();
+    assert.ok(store.get('depths', 10, 0, 0));
+  });
+
+  it('enforces the limit on its own as tiles are kept', async () => {
+    store = new OnlineTileStore(dir, 200_000);
+    for (let i = 0; i < 30; i++) {
+      store.put('depths', 10, i, 0, tile(i), 1000 + i);
+    }
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.ok(store.totalBytes() <= 200_000);
+    assert.ok(store.get('depths', 10, 29, 0));
+  });
+
+  /** What the chart's tile files take on disk, write-ahead log included. */
+  function diskBytes(catalogId: string): number {
+    return ['', '-wal'].reduce((sum, suffix) => {
+      const file = path.join(dir, `${catalogId}.mbtiles${suffix}`);
+      return sum + (fs.existsSync(file) ? fs.statSync(file).size : 0);
+    }, 0);
+  }
+
+  it('gives the space of removed tiles back to the disk', () => {
+    store = new OnlineTileStore(dir);
+    for (let i = 0; i < 20; i++) {
+      store.put('depths', 10, i, 0, tile(i), 1000 + i);
+    }
+    store.setLimit(Math.floor(store.totalBytes() / 4));
+    store.evict();
+    assert.ok(diskBytes('depths') <= store.totalBytes() * 1.5, String(diskBytes('depths')));
+  });
+
+  it('gives space back a bounded amount per turn across all charts', () => {
+    store = new OnlineTileStore(dir);
+    // Each chart frees fewer pages than one turn allows, together more.
+    for (let i = 0; i < 150; i++) {
+      store.put('depths', 10, i, 0, tile(i), 1000 + i);
+      store.put('wrecks', 10, i, 0, tile(i), 1000 + i);
+    }
+    store.setLimit(1);
+    assert.strictEqual(store.evict(), true);
+    assert.strictEqual(store.evict(), false);
+    assert.ok(diskBytes('depths') + diskBytes('wrecks') < 200_000);
+  });
+
+  it('adds the pinned column to a file kept before it existed', () => {
+    fs.mkdirSync(dir, { recursive: true });
+    const old = new DatabaseSync(path.join(dir, 'depths.mbtiles'));
+    old.exec(`CREATE TABLE tiles (zoom_level INTEGER NOT NULL, tile_column INTEGER NOT NULL,
+      tile_row INTEGER NOT NULL, tile_data BLOB NOT NULL, fetched_at INTEGER,
+      PRIMARY KEY (zoom_level, tile_column, tile_row))`);
+    old.prepare('INSERT INTO tiles VALUES (10, 0, 1023, ?, 1000)').run(tile(1));
+    old.close();
+    store = new OnlineTileStore(dir);
+    store.pin('depths', 10, 0, 0);
+    store.setLimit(1);
+    store.evict();
+    assert.ok(store.get('depths', 10, 0, 0));
+  });
+});
+
+describe('OnlineTileProxy for area downloads', () => {
+  let dir: string;
+  let store: OnlineTileStore;
+  const source: OnlineTileSource = { kind: 'xyz', url: 'https://t/{z}/{x}/{y}' };
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'online-pin-'));
+    store = new OnlineTileStore(dir);
+  });
+
+  afterEach(() => {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('pins what it fetches and what was already kept by browsing', async () => {
+    const proxy = new OnlineTileProxy(
+      store,
+      () => Promise.resolve(PNG),
+      () => 1000
+    );
+    await proxy.getTile('depths', source, 5, 1, 1);
+    assert.strictEqual(await proxy.ensureTile('depths', source, 5, 1, 1), 'kept');
+    assert.strictEqual(await proxy.ensureTile('depths', source, 5, 2, 2), 'fetched');
+    await proxy.getTile('depths', source, 5, 3, 3);
+    store.setLimit(1);
+    store.evict();
+    assert.ok(store.get('depths', 5, 1, 1));
+    assert.ok(store.get('depths', 5, 2, 2));
+    assert.strictEqual(store.get('depths', 5, 3, 3), null);
+  });
+
+  it('pins an old kept tile of the area even when its refresh fails', async () => {
+    let now = 1000;
+    let answer: Uint8Array | null = PNG;
+    const proxy = new OnlineTileProxy(
+      store,
+      () => Promise.resolve(answer),
+      () => now
+    );
+    await proxy.getTile('depths', source, 5, 1, 1);
+    now += TILE_REFRESH_MS + 1;
+    answer = null;
+    assert.strictEqual(await proxy.ensureTile('depths', source, 5, 1, 1), 'failed');
+    store.setLimit(1);
+    store.evict();
+    assert.ok(store.get('depths', 5, 1, 1));
+  });
+
+  it('tells whether any tile is kept for a chart', () => {
+    assert.strictEqual(store.hasTiles('depths'), false);
+    assert.strictEqual(store.hasTiles('../x'), false);
+    store.put('depths', 1, 0, 0, PNG, 1000);
+    assert.strictEqual(store.hasTiles('depths'), true);
+    store.clear('depths');
+    assert.strictEqual(store.hasTiles('depths'), false);
+  });
+
+  it('leaves out a tile file that cannot be read, in either order', () => {
+    for (const broken of ['aaa', 'zzz']) {
+      const healthy = broken === 'aaa' ? 'zzz' : 'aaa';
+      store.put('aaa', 10, 0, 0, new Uint8Array(20_000).fill(1), 1000);
+      store.put('zzz', 10, 0, 0, new Uint8Array(20_000).fill(1), 1000);
+      const oneChart = Math.ceil(store.totalBytes() / 2);
+      const other = new DatabaseSync(path.join(dir, `${broken}.mbtiles`));
+      other.exec('DROP TABLE tiles');
+      other.close();
+      // The healthy chart fits on its own, so only the unreadable file's
+      // bytes could push it out.
+      store.setLimit(oneChart);
+      store.evict();
+      assert.ok(store.get(healthy, 10, 0, 0));
+      store.put(healthy, 11, 0, 0, new Uint8Array(20_000).fill(2), 2000);
+      store.setLimit(oneChart);
+      store.evict();
+      assert.strictEqual(store.get(healthy, 10, 0, 0), null);
+      store.clear('aaa');
+      store.clear('zzz');
+    }
+  });
+
+  it('keeps the limit for the other charts when one tile file is damaged', () => {
+    store.put('depths', 10, 0, 0, new Uint8Array(20_000).fill(1), 1000);
+    fs.writeFileSync(path.join(dir, 'broken.mbtiles'), 'not a database');
+    store.setLimit(1);
+    store.evict();
+    assert.strictEqual(store.get('depths', 10, 0, 0), null);
+  });
+});
