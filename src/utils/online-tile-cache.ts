@@ -12,7 +12,7 @@
 import fs from 'fs';
 import path from 'path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
-import { Type } from 'typebox';
+import { Type, type Static } from 'typebox';
 import { Value } from 'typebox/value';
 import {
   offlineTemplateProblem,
@@ -24,8 +24,33 @@ export type OnlineTileSource =
   { kind: 'xyz'; url: string } | { kind: 'wms'; url: string; layers: readonly string[] };
 
 const OfflineSchema = Type.Object({
-  tileUrl: Type.Optional(Type.String({ pattern: '^https://' }))
+  tileUrl: Type.Optional(Type.String({ pattern: '^https://' })),
+  areaDownload: Type.Optional(Type.Boolean())
 });
+
+type OfflineBlock = Static<typeof OfflineSchema>;
+
+function proxiedSource(
+  entry: OnlineCatalogChart
+): { source: OnlineTileSource; offline: OfflineBlock } | null {
+  if (entry.offline === undefined || entry.temporal || !Value.Check(OfflineSchema, entry.offline)) {
+    return null;
+  }
+  const { offline } = entry;
+  const { chart } = entry;
+  const template = offline.tileUrl ?? (chart.type === 'tilelayer' ? chart.url : null);
+  if (template !== null) {
+    // The published file is read leniently, so a template the plugin cannot
+    // fill keeps the chart streamed rather than routed to tiles it never gets.
+    return offlineTemplateProblem(template)
+      ? null
+      : { source: { kind: 'xyz', url: template }, offline };
+  }
+  if (chart.type === 'WMS' && chart.layers && chart.layers.length > 0) {
+    return { source: { kind: 'wms', url: chart.url, layers: chart.layers }, offline };
+  }
+  return null;
+}
 
 /**
  * The tile source to proxy for a catalog entry, or null when the chart is
@@ -34,20 +59,16 @@ const OfflineSchema = Type.Object({
  * plugin cannot address tile by tile.
  */
 export function offlineTileSource(entry: OnlineCatalogChart): OnlineTileSource | null {
-  if (entry.offline === undefined || entry.temporal || !Value.Check(OfflineSchema, entry.offline)) {
-    return null;
-  }
-  const { chart } = entry;
-  const template = entry.offline.tileUrl ?? (chart.type === 'tilelayer' ? chart.url : null);
-  if (template !== null) {
-    // The published file is read leniently, so a template the plugin cannot
-    // fill keeps the chart streamed rather than routed to tiles it never gets.
-    return offlineTemplateProblem(template) ? null : { kind: 'xyz', url: template };
-  }
-  if (chart.type === 'WMS' && chart.layers && chart.layers.length > 0) {
-    return { kind: 'wms', url: chart.url, layers: chart.layers };
-  }
-  return null;
+  return proxiedSource(entry)?.source ?? null;
+}
+
+/**
+ * Whether areas of a chart kept offline may be downloaded in advance. Some
+ * providers allow keeping the tiles a plotter shows but not bulk downloads.
+ */
+export function allowsAreaDownload(entry: OnlineCatalogChart): boolean {
+  const proxied = proxiedSource(entry);
+  return proxied !== null && proxied.offline.areaDownload !== false;
 }
 
 const HALF_WORLD = 20037508.342789244;
