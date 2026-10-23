@@ -116,7 +116,7 @@ describe('the cache on disk', () => {
     fs.mkdirSync(out, { recursive: true });
     for (const layer of layers) {
       fs.writeFileSync(
-        path.join(out, `${layer}_${name}.geojson`),
+        path.join(out, `${layer}__${name}.geojson`),
         `{"layer":"${layer}","cell":"${name}"}`
       );
     }
@@ -146,11 +146,11 @@ describe('the cache on disk', () => {
       'AA1CELL1.001'
     ]);
     assert.deepStrictEqual(fs.readdirSync(path.join(cell, 'geojson')).sort(), [
-      'DEPARE_AA1CELL1.geojson.gz',
-      'M_COVR_AA1CELL1.geojson.gz'
+      'DEPARE__AA1CELL1.geojson.gz',
+      'M_COVR__AA1CELL1.geojson.gz'
     ]);
     const text = zlib
-      .gunzipSync(fs.readFileSync(path.join(cell, 'geojson', 'DEPARE_AA1CELL1.geojson.gz')))
+      .gunzipSync(fs.readFileSync(path.join(cell, 'geojson', 'DEPARE__AA1CELL1.geojson.gz')))
       .toString('utf8');
     assert.strictEqual(text, '{"layer":"DEPARE","cell":"AA1CELL1"}');
 
@@ -184,11 +184,11 @@ describe('the cache on disk', () => {
     const files = (cell: string) =>
       fs.readdirSync(path.join(cellsDir('Set_U'), cell, 'geojson')).sort();
     assert.deepStrictEqual(files('IENC_Haven_Waspik_7_'), [
-      'DEPARE_IENC_Haven_Waspik_7_.geojson.gz',
-      'M_COVR_IENC_Haven_Waspik_7_.geojson.gz'
+      'DEPARE__IENC_Haven_Waspik_7_.geojson.gz',
+      'M_COVR__IENC_Haven_Waspik_7_.geojson.gz'
     ]);
-    assert.deepStrictEqual(files('AB_CD'), ['DEPARE_AB_CD.geojson.gz']);
-    assert.deepStrictEqual(files('CD'), ['LNDARE_CD.geojson.gz']);
+    assert.deepStrictEqual(files('AB_CD'), ['DEPARE__AB_CD.geojson.gz']);
+    assert.deepStrictEqual(files('CD'), ['LNDARE__CD.geojson.gz']);
     fs.rmSync(staging, { recursive: true, force: true });
     removeSetCache('Set_U');
   });
@@ -206,7 +206,7 @@ describe('the cache on disk', () => {
     const cell = path.join(cellsDir('Set_A'), 'AA1CELL1');
     assert.deepStrictEqual(fs.readdirSync(path.join(cell, 'raw')), ['AA1CELL1.000']);
     assert.deepStrictEqual(fs.readdirSync(path.join(cell, 'geojson')), [
-      'SOUNDG_AA1CELL1.geojson.gz'
+      'SOUNDG__AA1CELL1.geojson.gz'
     ]);
     assert.strictEqual(readSetCache('Set_A').get('AA1CELL1')?.version, 'AA1CELL1_ED002_UP000');
     fs.rmSync(staging, { recursive: true, force: true });
@@ -222,7 +222,7 @@ describe('the cache on disk', () => {
       ],
       out
     );
-    assert.deepStrictEqual(fs.readdirSync(out), ['DEPARE_AA1CELL2.geojson.gz']);
+    assert.deepStrictEqual(fs.readdirSync(out), ['DEPARE__AA1CELL2.geojson.gz']);
   });
 
   it('prunes cells the set no longer has', () => {
@@ -318,7 +318,7 @@ describe('updateSetCache', () => {
         }
         fs.mkdirSync(outDir, { recursive: true });
         for (const name of names) {
-          fs.writeFileSync(path.join(outDir, `DEPARE_${name}.geojson`), `{"cell":"${name}"}`);
+          fs.writeFileSync(path.join(outDir, `DEPARE__${name}.geojson`), `{"cell":"${name}"}`);
           if (opts.bad?.has(name)) {
             fs.appendFileSync(
               path.join(outDir, '.export-errors.log'),
@@ -502,5 +502,55 @@ describe('updateSetCache', () => {
     const result = await run('Partway', cells, again);
     assert.deepStrictEqual(again.downloaded, [cells.slice(CELLS_PER_EXPORT).map((c) => c.name)]);
     assert.strictEqual(result.used.length, CELLS_PER_EXPORT + 5);
+  });
+
+  function makeOutdated(setId: string, cell: string): void {
+    const file = path.join(cellsDir(setId), cell, 'cell.json');
+    const info = JSON.parse(fs.readFileSync(file, 'utf8')) as CachedCellInfo;
+    fs.writeFileSync(file, JSON.stringify({ ...info, exportRevision: CELL_EXPORT_REVISION - 1 }));
+  }
+
+  it('reads an older export’s copy again when a newer edition fails to download', async () => {
+    const cells = [planned('CELLGGG1', v('CELLGGG1', 1)), planned('CELLHHH1', v('CELLHHH1', 1))];
+    await run('Outdated', cells, fresh());
+    makeOutdated('Outdated', 'CELLGGG1');
+
+    const fakes = fresh();
+    const newer = [planned('CELLGGG1', v('CELLGGG1', 2)), cells[1]];
+    const result = await run('Outdated', newer, fakes, { failDownload: new Set(['CELLGGG1']) });
+    assert.deepStrictEqual(fakes.downloaded, [['CELLGGG1']]);
+    assert.deepStrictEqual(fakes.exported, [['CELLGGG1']], 'from its kept raw cell');
+    const entry = readSetCache('Outdated').get('CELLGGG1');
+    assert.strictEqual(entry?.exportRevision, CELL_EXPORT_REVISION);
+    assert.strictEqual(entry.version, v('CELLGGG1', 1), 'still the earlier edition');
+    assert.ok(
+      fs.existsSync(
+        path.join(cellsDir('Outdated'), 'CELLGGG1', 'geojson', 'DEPARE__CELLGGG1.geojson.gz')
+      )
+    );
+    assert.deepStrictEqual(result.used, ['CELLGGG1', 'CELLHHH1']);
+    assert.strictEqual(result.partial, true);
+  });
+
+  it('drops an older export’s copy GDAL cannot read again', async () => {
+    const cells = [planned('CELLGGG1', v('CELLGGG1', 1)), planned('CELLHHH1', v('CELLHHH1', 1))];
+    await run('Unreadable', cells, fresh());
+    makeOutdated('Unreadable', 'CELLHHH1');
+
+    const fakes = fresh();
+    const result = await run('Unreadable', cells, fakes, { bad: new Set(['CELLHHH1']) });
+    assert.deepStrictEqual(fakes.downloaded, []);
+    assert.deepStrictEqual(fakes.exported, [['CELLHHH1']]);
+    assert.deepStrictEqual(result.used, ['CELLGGG1'], 'never built from output it cannot read');
+    assert.strictEqual(readSetCache('Unreadable').has('CELLHHH1'), false);
+    assert.strictEqual(result.partial, true);
+    assert.strictEqual(result.changed, true);
+    assert.ok(fakes.log.some((l) => l.startsWith('WARNING: removed CELLHHH1')));
+    assert.ok(!fakes.log.some((l) => l.includes('no longer has')));
+
+    const again = fresh();
+    const next = await run('Unreadable', cells, again);
+    assert.deepStrictEqual(again.downloaded, [['CELLHHH1']]);
+    assert.deepStrictEqual(next.used, ['CELLGGG1', 'CELLHHH1']);
   });
 });
