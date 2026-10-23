@@ -200,7 +200,11 @@ the user picked.
 - **Downloading a set.** Each archive is downloaded once, however many of the
   set's cells it holds, and only those cells' files are extracted. Requests
   go to one host at a time, with a pause between them, and use the same TLS
-  and header fallbacks as the build.
+  and header fallbacks as the build. The archive URLs come from third
+  parties, so the plugin downloads only from public internet addresses: a
+  URL, or any redirect, whose host is or resolves to a loopback, private,
+  link-local or unique-local address, or a local network name such as
+  `.local`, fails that archive.
 - **Updates per cell.** A chart set keeps each cell it downloaded, with the
   version it was downloaded at and its GDAL output. An update downloads and
   runs GDAL only on cells whose version in the index changed, then builds
