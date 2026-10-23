@@ -172,8 +172,9 @@ merged catalog, because a Pages deployment replaces the whole site.
   relaxed (`src/catalog/lenient-download.ts`); TLS is verified as before.
 - **Polite downloads.** Archives are fetched one at a time per host, with a
   pause between requests. Different hosts run side by side.
-- **Identical output everywhere.** GDAL runs in the charts-toolbox image
-  (`docs/charts-toolbox-image.md`) at the version the plugin pins. Coordinates
+- **Identical output everywhere.** GDAL is the plugin's own WebAssembly
+  build (gdal3.js, `docs/chart-conversion.md`) at the version `package.json`
+  pins. Coordinates
   are simplified and rounded by fixed rules, and everything is sorted. So a
   maintainer's machine and CI produce the same file and content hash.
 
@@ -182,7 +183,7 @@ merged catalog, because a Pages deployment replaces the whole site.
 The first build downloads every archive, mostly from small government
 servers, which set the pace. CI does it under the time budget: each run
 publishes what it has read, and the next scheduled run carries on, so the
-index fills over a few runs, all from the same image. The CLI is the same one
+index fills over a few runs, all with the same GDAL. The CLI is the same one
 CI runs and can be run locally to debug an odd source; its header comment
 lists its flags.
 

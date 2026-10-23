@@ -69,8 +69,6 @@ import {
   removeFolderState
 } from './utils/folder-state.js';
 import { getCpuBudget, setCpuBudget } from './utils/concurrency.js';
-import { PLUGIN_OWNER_ID } from './utils/container-jobs.js';
-import { getContainerManager, waitForContainerManager } from './utils/container-manager.js';
 import { MAX_CONVERSION_LOG_LINES, resolveLogTail } from './utils/conversion-log.js';
 import { downloadManager } from './utils/download-manager.js';
 import { scanAllFolders, scanChartsRecursively } from './utils/file-scanner.js';
@@ -165,7 +163,7 @@ import {
   sweepChartSetCache,
   updateSetCache
 } from './utils/chart-set-cache.js';
-import { CHARTS_TOOLBOX_IMAGE } from './utils/container-images.js';
+import { gdalBuildId } from './utils/gdal-wasm.js';
 import {
   appendCatalogLog,
   boxStatesForCatalog,
@@ -222,11 +220,7 @@ const pluginVersion: string = (packageJson as { version: string }).version;
 // plugin lifecycle, stranding their files in the quarantine.
 let globalJobCompletedListener: ((job: DownloadJob) => void) | null = null;
 
-// Single source of truth lives in container-jobs.ts as PLUGIN_OWNER_ID
-// (used as the `ownerPluginId` label on every runJob call). The plugin
-// id Signal K uses must match exactly so `cleanupOrphanedJobs` reaps
-// the right containers — alias rather than duplicate the literal.
-const PLUGIN_ID = PLUGIN_OWNER_ID;
+const PLUGIN_ID = 'signalk-charts-provider-simple';
 // Small enough for the SD card of a Raspberry Pi, large enough for a cruising area at harbour zoom.
 const DEFAULT_ONLINE_CACHE_LIMIT_MB = 2048;
 const DEFAULT_MASKED_CACHE_LIMIT_MB = 1024;
@@ -498,7 +492,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
       }
       // Signal K does not await start(); run async init in a self-contained
       // promise that handles its own errors so a setPluginError surfaces
-      // anything we couldn't recover from (e.g. signalk-container missing).
+      // anything we couldn't recover from.
       doStartup(config).catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
         app.setPluginError(`Startup failed: ${msg}`);
@@ -624,32 +618,6 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
 
       return router;
     }
-  };
-
-  // Message surfaced when chart conversion is needed but the
-  // signalk-container plugin (which owns the container runtime layer from
-  // 2.0 onward) isn't available. Shared by the startup path and the
-  // conversion REST guards so the wording stays identical everywhere.
-  const containerRequiredMessage =
-    'signalk-container plugin required for chart conversion. Install it from the App Store and restart Signal K. Chart display continues to work without it.';
-
-  // True when something actually needs the container runtime: a conversion
-  // still in flight from a previous plugin lifecycle (a config save restarts
-  // the plugin, but module-level converter state survives it),
-  // catalog-installed charts (their updates are download+convert), or saved
-  // chart sets (the NOAA tab is conversion-fed by definition). Pure display
-  // setups — serving existing .mbtiles/tilemaps — never need the runtime.
-  const hasContainerDependentCharts = (): boolean =>
-    getConvertingCount() > 0 ||
-    Object.keys(getInstalledCatalogCharts()).length > 0 ||
-    listCustomCatalogs().length > 0;
-
-  // The user just tried to start an operation that needs the container
-  // runtime and it isn't there. The 503 response explains the problem
-  // inside the tab, but the dashboard status line should carry it too —
-  // that's where plugin health is expected to show up.
-  const reportContainerRuntimeMissing = (): void => {
-    app.setPluginError(containerRequiredMessage);
   };
 
   const doStartup = async (config: PluginConfig): Promise<void> => {
@@ -834,12 +802,8 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     initRncConverter(app.debug.bind(app));
 
     // Bring up the display path (chart loading + resource-provider
-    // registration) BEFORE discovering signalk-container. Display does not
-    // need the container runtime, and gating registration behind the
-    // up-to-30s container wait left Freeboard-SK's GET
-    // /signalk/v2/api/resources/charts returning 404 until the wait
-    // resolved — so charts vanished from the chart list on hosts without
-    // signalk-container installed.
+    // registration) first, so Freeboard-SK's GET
+    // /signalk/v2/api/resources/charts answers as soon as possible.
     app.debug(`Start chart provider. Chart path: ${chartPath}`);
     onlineTimeActive = true;
     const loadOk = await loadChartProviders(chartPath);
@@ -853,21 +817,19 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     }
 
     // Report Started for the display path. Don't clobber a load error
-    // (loadChartProviders sets one) — a later setPluginError from the
-    // signalk-container discovery below (only raised when conversion work
-    // actually needs it) is allowed to win over this status.
+    // (loadChartProviders sets one).
     if (loadOk) {
       app.setPluginStatus('Started');
     }
 
     // Publish the in-process refresh hook for peer plugins (same pattern
-    // as signalk-container's `__signalk_containerManager` global): chart
+    // as other plugins' globalThis hand-offs): chart
     // PRODUCERS that drop .mbtiles into the charts directory while the
     // server runs (e.g. signalk-corridor-tile-downloader) need a rescan
     // to get their files registered — findCharts has no file watcher.
     // The global is an in-process hand-off: no HTTP round-trip, so it
     // also works on servers with security enabled. Published as soon as
-    // the display path is live (before the container-manager wait) and
+    // the display path is live and
     // withdrawn in stop().
     (globalThis as unknown as ChartsProviderRefreshGlobal).__signalk_chartsProviderRefresh =
       async (): Promise<number> => {
@@ -880,22 +842,11 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         return Object.keys(chartProviders).length;
       };
 
-    // Discover the signalk-container plugin's manager API.  Chart conversion
-    // (S-57, BSB raster, Pilot, basemaps) goes through it from 2.0 onward;
-    // the App Store's `signalk.recommends` declaration in our package.json
-    // ensures users are prompted to install signalk-container, but plugin
-    // load order is not deterministic, so we wait up to 30 s before giving
-    // up.  A missing manager only surfaces as setPluginError when something
-    // actually needs the runtime (see hasContainerDependentCharts) and never
-    // aborts startup — chart *display* (serving tiles for already-converted
-    // .mbtiles) doesn't need the runtime layer and remains functional.
     // Wipe any quarantine subdirs left behind by a previous server
     // lifecycle. Conversions write into <dataDir>/in-progress/<chartNumber>/
     // and only promote to chartPath on success — if Signal K crashed
     // mid-conversion the partial .mbtiles is in the quarantine and
-    // safe to drop. Runs unconditionally (independent of whether
-    // signalk-container is reachable) because it only touches our
-    // own filesystem state.
+    // safe to drop.
     try {
       const swept = sweepStaleQuarantineDirs(app.getDataDirPath());
       if (swept > 0) {
@@ -907,114 +858,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
       app.debug(`Quarantine sweep failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    const containerManager = await waitForContainerManager({
-      // Don't overwrite the display path's "Started" status with a waiting
-      // message: when charts have already loaded, serving is live and a
-      // "Waiting for signalk-container..." status would be misleading.
-      onWaitingStatus: () => {
-        if (!loadOk) {
-          app.setPluginStatus('Waiting for signalk-container...');
-        }
-      }
-    });
-    // The wait can outlast this lifecycle; a stopped plugin starts no timers,
-    // listeners or housekeeping.
-    if (lifecycle !== started) {
-      return;
-    }
-    if (!containerManager) {
-      // Only raise the missing runtime to an ERROR when something actually
-      // needs it (see hasContainerDependentCharts). A pure display setup
-      // never touches the container layer, and a standing error there just
-      // makes a healthy plugin look broken — the Convert tab already
-      // explains the situation inside the UI when the runtime is missing.
-      if (hasContainerDependentCharts()) {
-        reportContainerRuntimeMissing();
-      } else {
-        console.log(
-          '[charts-provider] signalk-container not available — chart conversion disabled (chart display unaffected)'
-        );
-      }
-    } else {
-      const runtime = containerManager.getRuntime();
-      app.debug(
-        `signalk-container detected: ${runtime?.runtime ?? 'unknown'} ${runtime?.version ?? ''}`.trim()
-      );
-
-      // Reap any helper containers leaked by a previous Signal K
-      // crash mid-conversion. Each reaped orphan clears the
-      // matching install record and converting flag so the catalog
-      // UI doesn't show "Installed" or "Converting…" for a job
-      // that no longer exists. Requires signalk-container >= 1.3.0;
-      // older versions don't have the API and we just skip.
-      if (typeof containerManager.cleanupOrphanedJobs === 'function') {
-        try {
-          const cleanup = await containerManager.cleanupOrphanedJobs({
-            ownerPluginId: PLUGIN_OWNER_ID
-          });
-          // The next start reaps them again.
-          if (lifecycle !== started) {
-            return;
-          }
-          // Labels we set on runJob calls have the form
-          // `<stage>-<chartNumber>`, where <stage> is one of a fixed
-          // set of strings (gdal-export, tippecanoe, gdal-translate,
-          // gdaladdo, tar-extract, gdal-rasterize). The naïve
-          // `replace(/^[a-z-]+-/, '')` was greedy — it would strip
-          // every hyphenated prefix and corrupt chartNumbers that
-          // themselves contain hyphens (e.g. `tippecanoe-abc-def`
-          // would yield `def` instead of `abc-def`). Match the
-          // longest known prefix and take everything after.
-          const STAGES = [
-            'gdal-export',
-            'gdal-translate',
-            'gdal-rasterize',
-            'tar-extract',
-            'tippecanoe',
-            'gdaladdo'
-          ];
-          const extractChartNumber = (label: string | undefined): string | null => {
-            if (!label) {
-              return null;
-            }
-            for (const stage of STAGES) {
-              const prefix = `${stage}-`;
-              if (label.startsWith(prefix)) {
-                return label.slice(prefix.length) || null;
-              }
-            }
-            return null;
-          };
-
-          for (const orphan of cleanup.reaped) {
-            const chartNumber = extractChartNumber(orphan.label);
-            app.debug(
-              `Reaped orphan job ${orphan.name} (${orphan.label ?? 'no label'}); ` +
-                `rolling back chart ${chartNumber ?? '<unknown>'}`
-            );
-            if (chartNumber) {
-              setConvertingState(chartNumber, false);
-              // A restart/crash can land here mid-update. rollbackInstall
-              // restores the prior on-disk version (UPDATE) or drops the
-              // pending record (FRESH), reading the snapshot trackInstall
-              // persisted in the record — so a still-pending update keeps
-              // surfacing in checkForUpdates(). For a committed record (no
-              // snapshot marker) it's a no-op, so a spurious reap of an
-              // already-installed chart doesn't delete it.
-              rollbackInstall(chartNumber);
-            }
-          }
-          if (cleanup.reaped.length > 0) {
-            console.log(
-              `[charts-provider] Reaped ${cleanup.reaped.length} orphan job(s) ` +
-                `from a previous Signal K lifecycle`
-            );
-          }
-        } catch (err) {
-          app.debug(`Orphan cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
-    }
+    // A stopped plugin starts no timers, listeners or housekeeping.
     if (lifecycle !== started) {
       return;
     }
@@ -1061,8 +905,8 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     // journal/WAL files) runs independently of the display path so it can
     // never delay chart listing. It rescans the chart directory itself
     // rather than reusing the startup snapshot — charts may have been
-    // uploaded/downloaded/converted during the container-manager wait, and
-    // a stale snapshot would delete them as "invalid".
+    // uploaded/downloaded/converted since, and a stale snapshot would
+    // delete them as "invalid".
     void cleanupChartDirectory(chartPath);
   };
 
@@ -1358,9 +1202,8 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     return true;
   };
 
-  // Tippecanoe accepts zooms 0–22 in practice (anything beyond produces
-  // 4×4 pixel tiles per source feature; nothing useful comes out and the
-  // job runs much longer). Bound the inputs to that envelope so a typo
+  // Vector tiles past z22 resolve below a centimetre; nothing useful comes
+  // out and the job runs much longer. Bound the inputs to that envelope so a typo
   // (`minzoom: 100`) is rejected at the boundary instead of silently
   // turning into a multi-hour conversion that produces unusable output.
   const ZoomLevel = Type.Integer({ minimum: 0, maximum: 22 });
@@ -2298,7 +2141,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
 
         // Patch the MBTiles `metadata.name` row to match the new label
         // so consumers (Freeboard-SK, OpenCPN-Web) display the renamed
-        // chart by its new name and not the stale value tippecanoe (or
+        // chart by its new name and not the stale value the converter (or
         // an earlier rename) wrote. Best-effort — a failure here doesn't
         // abort the rename, the file move already succeeded.
         try {
@@ -3745,25 +3588,19 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     });
 
     router.get('/catalog-s57-status', (_req: Request, res: Response) => {
-      // Runtime info is owned by signalk-container in 2.0+; we report
-      // whatever its manager exposes.  Available = manager present AND
-      // its runtime detection has succeeded.  socketPath is no longer a
-      // first-class concept (signalk-container shells out to the
-      // podman/docker CLI rather than the daemon socket), so we emit
-      // null for that field — the UI uses it for display only.
-      const containerManager = getContainerManager();
-      const rt = containerManager?.getRuntime() ?? null;
-      const available = rt !== null;
-      const version = rt ? `${rt.runtime} version ${rt.version}` : null;
-      const engine = rt?.runtime ?? null;
+      // Conversion runs in-process (GDAL compiled to WebAssembly), so it is
+      // always available. The container-era fields stay, meaning "conversion
+      // available", for clients written against 2.x.
+      const converter = gdalBuildId();
       res.json({
-        containerRuntimeAvailable: available,
-        containerRuntimeVersion: version,
-        containerRuntimeEngine: engine,
+        conversionAvailable: true,
+        converter,
+        containerRuntimeAvailable: true,
+        containerRuntimeVersion: converter,
+        containerRuntimeEngine: null,
         containerRuntimeSocketPath: null,
-        // legacy aliases (kept until next breaking release)
-        podmanAvailable: available,
-        podmanVersion: version,
+        podmanAvailable: true,
+        podmanVersion: converter,
         conversions: { ...getAllS57Progress(), ...getAllRncProgress() }
       });
     });
@@ -3884,18 +3721,6 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
 
         const validatedFile = uploadedFile;
         void (async () => {
-          const cm = getContainerManager();
-          if (!cm?.getRuntime()) {
-            reportContainerRuntimeMissing();
-            cleanupDir(tmpDir);
-            res.status(503).json({
-              success: false,
-              error:
-                'signalk-container plugin not available. Install it from the App Store and restart Signal K.'
-            });
-            return;
-          }
-
           const budgetMax = getCpuBudget().maxConcurrentConversions;
           if (getConvertingCount() >= budgetMax) {
             cleanupDir(tmpDir);
@@ -4057,25 +3882,16 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
           fs.mkdirSync(targetDir, { recursive: true });
         }
 
-        const needsRuntime = ['s57-zip', 'rnc-zip', 'gshhg', 'pilot-tar', 'shp-basemap'].includes(
-          classification.format
-        );
-
-        if (needsRuntime) {
-          const cm = getContainerManager();
-          if (!cm?.getRuntime()) {
-            reportContainerRuntimeMissing();
-            res.status(503).json({
-              success: false,
-              error:
-                'signalk-container plugin not available. Install it from the App Store and restart Signal K.'
-            });
-            return;
-          }
-        }
+        const needsConversion = [
+          's57-zip',
+          'rnc-zip',
+          'gshhg',
+          'pilot-tar',
+          'shp-basemap'
+        ].includes(classification.format);
 
         const budgetMax = getCpuBudget().maxConcurrentConversions;
-        if (needsRuntime && getConvertingCount() >= budgetMax) {
+        if (needsConversion && getConvertingCount() >= budgetMax) {
           res.status(429).json({
             success: false,
             error: `Too many conversions running (max ${budgetMax}). Please wait for a conversion to finish.`
@@ -4401,16 +4217,6 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         res.status(409).json({ success: false, error: 'Already downloading/converting' });
         return;
       }
-      const cm = getContainerManager();
-      if (!cm?.getRuntime()) {
-        reportContainerRuntimeMissing();
-        res.status(503).json({
-          success: false,
-          error:
-            'signalk-container plugin not available. Install it from the App Store and restart Signal K.'
-        });
-        return;
-      }
       const budgetMax = getCpuBudget().maxConcurrentConversions;
       if (getConvertingCount() >= budgetMax) {
         res.status(429).json({
@@ -4458,8 +4264,8 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         sectionLabel: 'Cancelling…',
         sectionPercent: -1
       });
-      // Aborts the in-flight container job on signalk-container >= 1.16.0;
-      // downloads stop between charts; older containers stop at a band boundary.
+      // Aborts the in-flight conversion (its worker threads are terminated);
+      // downloads stop between charts.
       res.json({ success: true, message: 'Cancellation requested' });
     });
 
@@ -5107,14 +4913,14 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     const stagedSoFar: string[] = [];
 
     // Abort controller for mid-job cancel: requestCatalogCancel(id) aborts it,
-    // which kills the in-flight container job on signalk-container >= 1.16.0.
+    // which terminates the in-flight conversion's worker threads.
     const abortController = new AbortController();
     registerCatalogAbort(id, abortController);
 
     void (async () => {
       let quarantineDir: string | null = null;
       let convertingFlagged = false;
-      // Claim a conversion slot once per run, for GDAL or tippecanoe,
+      // Claim a conversion slot once per run, for GDAL or tiling,
       // whichever comes first.
       const claimConversionSlot = (): void => {
         if (convertingFlagged) {
@@ -5189,74 +4995,65 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
 
         // 1-3. Bring the set's cache up to date: download and read with GDAL
         //      only the cells that are new or changed.
-        const update = await updateSetCache(
-          id,
-          resolution.cells,
-          stagingRoot,
-          CHARTS_TOOLBOX_IMAGE,
-          {
-            // Cells the cache already has count as landed for the map's fill.
-            onPlan: (plan) => {
-              stagedSoFar.push(
-                ...plan.reuse.map((c) => c.name),
-                ...plan.reexport.map((c) => c.name)
-              );
-              setCatalogDetail(id, { downloadedChartIds: [...stagedSoFar] });
-            },
-            download: (cells, encDir) =>
-              downloadAndExtractEncs(cells, encDir, zipsDir, {
-                onProgress: (done, total, label) => {
-                  setCatalogProgress(id, 'downloading', `Downloading ${done}/${total}: ${label}`);
-                  setCatalogDetail(id, {
-                    phase: 'downloading',
-                    overallPercent: 0,
-                    sectionLabel: `Downloading ${done}/${total}`,
-                    sectionPercent: total > 0 ? Math.round((done / total) * 100) : -1
-                  });
-                },
-                // Flip the map area as each cell lands, rather than all at once.
-                onStaged: (chartId) => {
-                  stagedSoFar.push(chartId);
-                  setCatalogDetail(id, { downloadedChartIds: [...stagedSoFar] });
-                },
-                onLog: (line) => appendCatalogLog(id, line),
-                isAborted: () => isCatalogCancelRequested(id),
-                signal: abortController.signal
-              }),
-            // Re-check the conversion budget right before claiming a slot:
-            // GDAL and tippecanoe are the CPU-heavy part. The admission check
-            // at request time ran before the (long) download, so several sets
-            // could have passed it and now be ready to convert together. This
-            // synchronous check + setConvertingState pair is atomic in the
-            // event loop, so it can't over-subscribe maxConcurrentConversions.
-            beforeExport: (count) => {
-              claimConversionSlot();
-              setCatalogProgress(id, 'converting', `Reading ${String(count)} changed cell(s)…`);
-              setCatalogDetail(id, {
-                phase: 'converting',
-                overallPercent: 0,
-                sectionLabel: `Reading ${String(count)} changed cell(s)`,
-                sectionPercent: -1
-              });
-            },
-            exportCells: async (inDir, outDir) => {
-              try {
-                await exportS57CellsToGeoJSON(inDir, outDir, id, abortController.signal);
-              } finally {
-                // The conversion below starts a fresh S-57 log for this set;
-                // keep what GDAL reported, without its progress lines.
-                for (const line of getS57Progress(id)?.log ?? []) {
-                  if (!line.trim().startsWith('PROGRESS:')) {
-                    appendCatalogLog(id, line);
-                  }
+        const update = await updateSetCache(id, resolution.cells, stagingRoot, gdalBuildId(), {
+          // Cells the cache already has count as landed for the map's fill.
+          onPlan: (plan) => {
+            stagedSoFar.push(...plan.reuse.map((c) => c.name), ...plan.reexport.map((c) => c.name));
+            setCatalogDetail(id, { downloadedChartIds: [...stagedSoFar] });
+          },
+          download: (cells, encDir) =>
+            downloadAndExtractEncs(cells, encDir, zipsDir, {
+              onProgress: (done, total, label) => {
+                setCatalogProgress(id, 'downloading', `Downloading ${done}/${total}: ${label}`);
+                setCatalogDetail(id, {
+                  phase: 'downloading',
+                  overallPercent: 0,
+                  sectionLabel: `Downloading ${done}/${total}`,
+                  sectionPercent: total > 0 ? Math.round((done / total) * 100) : -1
+                });
+              },
+              // Flip the map area as each cell lands, rather than all at once.
+              onStaged: (chartId) => {
+                stagedSoFar.push(chartId);
+                setCatalogDetail(id, { downloadedChartIds: [...stagedSoFar] });
+              },
+              onLog: (line) => appendCatalogLog(id, line),
+              isAborted: () => isCatalogCancelRequested(id),
+              signal: abortController.signal
+            }),
+          // Re-check the conversion budget right before claiming a slot:
+          // GDAL and tiling are the CPU-heavy part. The admission check
+          // at request time ran before the (long) download, so several sets
+          // could have passed it and now be ready to convert together. This
+          // synchronous check + setConvertingState pair is atomic in the
+          // event loop, so it can't over-subscribe maxConcurrentConversions.
+          beforeExport: (count) => {
+            claimConversionSlot();
+            setCatalogProgress(id, 'converting', `Reading ${String(count)} changed cell(s)…`);
+            setCatalogDetail(id, {
+              phase: 'converting',
+              overallPercent: 0,
+              sectionLabel: `Reading ${String(count)} changed cell(s)`,
+              sectionPercent: -1
+            });
+          },
+          exportCells: async (inDir, outDir) => {
+            try {
+              await exportS57CellsToGeoJSON(inDir, outDir, id, abortController.signal);
+            } finally {
+              // The conversion below starts a fresh S-57 log for this set;
+              // keep what GDAL reported, without its progress lines.
+              for (const line of getS57Progress(id)?.log ?? []) {
+                if (!line.trim().startsWith('PROGRESS:')) {
+                  appendCatalogLog(id, line);
                 }
-                clearS57Progress(id);
               }
-            },
-            isCancelled: () => isCatalogCancelRequested(id),
-            log: (line) => appendCatalogLog(id, line)
-          }
-        );
+              clearS57Progress(id);
+            }
+          },
+          isCancelled: () => isCatalogCancelRequested(id),
+          log: (line) => appendCatalogLog(id, line)
+        });
         // Nothing to download or read again and the chart already built from
         // exactly these cells: building it again would give the same file.
         const chartFile =
@@ -5327,16 +5124,13 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
             isAborted: () => isCatalogCancelRequested(id),
             // GDAL already ran on every cell; build from its cached output.
             geojsonFor: cachedGeojsonFor(id),
-            // Overall (convert-only) bar treats the per-band tippecanoe passes
-            // plus the final combine as equal slices, so it rises monotonically
-            // through the whole conversion. The combine now reports its own %
-            // (derived from tile-join's tile-coordinate output), so its section
-            // bar is determinate too.
+            // GDAL already ran (the cache supplies its output), so the
+            // convert-only bar is the tiler's progress.
             onProgress: (p) => {
-              // Once cancel is requested, the in-flight job is being killed but
-              // may emit a few more progress lines before it dies. Don't let
-              // those overwrite the "Cancelling…" state — otherwise the UI
-              // flips back to "running" until the job actually unwinds.
+              // Once cancel is requested, the in-flight conversion is being
+              // stopped but may emit a few more progress lines before it
+              // dies. Don't let those overwrite the "Cancelling…" state —
+              // otherwise the UI flips back to "running" until it unwinds.
               if (isCatalogCancelRequested(id)) {
                 setCatalogDetail(id, {
                   phase: 'cancelling',
@@ -5345,37 +5139,12 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
                 });
                 return;
               }
-              const hasJoin = p.bucketCount >= 2;
-              const denom = p.bucketCount + (hasJoin ? 1 : 0);
-              const pct = p.bucketPercent >= 0 ? p.bucketPercent : 0;
-              let overall: number;
-              let sectionLabel: string;
-              let sectionPercent: number;
-              if (p.stage === 'join') {
-                // Clamp: with a single bucket (no dedicated join slot) the
-                // join collapses to a file move and emits 100%, which would
-                // otherwise compute >100 here.
-                overall =
-                  denom > 0
-                    ? Math.min(100, Math.round(((p.bucketCount + pct / 100) / denom) * 100))
-                    : 99;
-                sectionLabel = `Combining ${p.bucketCount} tile sets`;
-                sectionPercent = p.bucketPercent;
-              } else if (p.stage === 'export') {
-                overall = denom > 0 ? Math.round(((p.bucketIndex - 1) / denom) * 100) : 0;
-                sectionLabel = `${p.bucketLabel} — reading charts (${p.bucketIndex} of ${p.bucketCount})`;
-                sectionPercent = -1;
-              } else {
-                overall =
-                  denom > 0 ? Math.round(((p.bucketIndex - 1 + pct / 100) / denom) * 100) : 0;
-                sectionLabel = `${p.bucketLabel} — generating tiles (${p.bucketIndex} of ${p.bucketCount})`;
-                sectionPercent = Math.round(pct);
-              }
+              const pct = Math.round(Math.max(0, p.bucketPercent));
               setCatalogDetail(id, {
-                phase: p.stage === 'join' ? 'joining' : 'converting',
-                overallPercent: overall,
-                sectionLabel,
-                sectionPercent
+                phase: 'converting',
+                overallPercent: p.stage === 'tiles' ? pct : 0,
+                sectionLabel: p.stage === 'tiles' ? 'Generating tiles' : 'Reading charts',
+                sectionPercent: p.stage === 'tiles' ? pct : p.bucketPercent
               });
             },
             signal: abortController.signal
@@ -5825,8 +5594,8 @@ export const serveTileFromMbtiles = (
     const result = provider._mbtilesHandle?.getTile(z, x, y) ?? null;
 
     if (!result) {
-      // Combined NOAA chart sets have spatially varying max zoom (per-band
-      // bounds + zoom ranges merged by tile-join), so clients legitimately
+      // Combined NOAA chart sets have spatially varying max zoom (each IHO
+      // band tiled to its own zoom range), so clients legitimately
       // request tiles in coverage holes the advertised zoom range implies
       // should exist. Re-slice the nearest ancestor instead of 404ing black.
       if (provider.format === 'pbf' && provider._mbtilesHandle) {

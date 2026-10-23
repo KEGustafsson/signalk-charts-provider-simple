@@ -304,21 +304,21 @@ export interface S57ConversionResult {
 }
 
 /**
- * Structured per-bucket progress for the multi-band S-57 pipeline. A "bucket"
- * is one IHO band (or the unbanded remainder); the pipeline runs them in
- * sequence, then tile-joins. Consumed by the Custom Catalogs UI to drive its
- * progress bars; the upload / single-chart catalog flows don't pass an
- * `onProgress` and so never see these.
+ * Structured progress of an S-57 conversion, consumed by the Custom Catalogs
+ * UI to drive its progress bars; the upload / single-chart catalog flows
+ * don't pass an `onProgress` and so never see these. The conversion runs as
+ * one bucket (every IHO band in one tiling pass), so `bucketIndex` and
+ * `bucketCount` are both 1; the fields keep the shape 2.x reported.
  */
 export interface S57BucketProgress {
-  /** `export` = GDAL→GeoJSON, `tiles` = tippecanoe, `join` = tile-join. */
-  stage: 'export' | 'tiles' | 'join';
+  /** `export` = GDAL→GeoJSON, `tiles` = vector tiling. */
+  stage: 'export' | 'tiles';
   /** 1-based index of the current bucket. */
   bucketIndex: number;
   bucketCount: number;
-  /** Human label, e.g. "Band 4" / "Other charts" / "Joining". */
+  /** Human label. */
   bucketLabel: string;
-  /** 0–100 for `tiles`; -1 (indeterminate) for `export` / `join`. */
+  /** 0–100, or -1 when indeterminate. */
   bucketPercent: number;
 }
 
@@ -340,21 +340,19 @@ export interface S57ConversionOptions {
    */
   displayDescription?: string;
   /**
-   * Optional structured progress reporter. Called as the per-band pipeline
-   * moves through export → tiles → join for each bucket. Only the Custom
-   * Catalogs flow passes this.
+   * Optional structured progress reporter, called as the conversion moves
+   * through export → tiles. Only the Custom Catalogs flow passes this.
    */
   onProgress?: (progress: S57BucketProgress) => void;
   /**
-   * Optional cooperative-cancel check. Polled between buckets (and before
-   * tile-join) to stop the pipeline at the next boundary — a complement to
-   * `signal`, and the only cancel path on signalk-container < 1.16.0.
+   * Optional cooperative-cancel check, polled between stages — a complement
+   * to `signal`.
    */
   isAborted?: () => boolean;
   /**
-   * Optional abort signal threaded into every container job. On
-   * signalk-container >= 1.16.0 this kills the in-flight job (GDAL,
-   * tippecanoe, or tile-join) immediately rather than waiting for a boundary.
+   * Optional abort signal. Aborting it terminates the conversion's worker
+   * threads, stopping a GDAL export or tiling pass at once rather than at
+   * the next stage boundary.
    */
   signal?: AbortSignal;
   /**
@@ -364,13 +362,6 @@ export interface S57ConversionOptions {
    * from GDAL output it kept from earlier runs.
    */
   geojsonFor?: (encFiles: readonly string[], outDir: string) => Promise<void>;
-}
-
-export interface ContainerRuntimeStatus {
-  available: boolean;
-  version: string | null;
-  socketPath: string | null;
-  engine: 'docker' | 'podman' | null;
 }
 
 export interface RncConversionResult {

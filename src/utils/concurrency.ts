@@ -5,10 +5,11 @@ export type CpuBudgetPreset = 'single-core' | 'half' | 'all';
 export interface ResolvedBudget {
   /** Max number of conversion jobs that can run at the same time. */
   maxConcurrentConversions: number;
-  /** TIPPECANOE_MAX_THREADS env passed to each tippecanoe container. */
-  tippecanoeThreadsPerJob: number;
-  /** Width of the xargs -P fan-out used for parallel ogr2ogr in the GDAL export stage. */
-  gdalExportParallelism: number;
+  /**
+   * Worker threads each conversion runs on (worker-pool.ts): GDAL exports
+   * and tile shards, one per worker at a time.
+   */
+  workersPerJob: number;
 }
 
 const cpuCount = (): number => Math.max(1, os.cpus().length);
@@ -19,16 +20,14 @@ function resolveBudget(preset: CpuBudgetPreset, cpus: number): ResolvedBudget {
     case 'single-core':
       return {
         maxConcurrentConversions: 1,
-        tippecanoeThreadsPerJob: 1,
-        gdalExportParallelism: 1
+        workersPerJob: 1
       };
     case 'all':
       // One full-throttle job. Multi-bundle uploads queue serially; each
-      // single bundle uses every core in both stages.
+      // single bundle uses every core.
       return {
         maxConcurrentConversions: 1,
-        tippecanoeThreadsPerJob: safe,
-        gdalExportParallelism: safe
+        workersPerJob: safe
       };
     case 'half':
     default: {
@@ -43,8 +42,7 @@ function resolveBudget(preset: CpuBudgetPreset, cpus: number): ResolvedBudget {
       const perJob = Math.max(1, Math.floor(safe / 2));
       return {
         maxConcurrentConversions: 1,
-        tippecanoeThreadsPerJob: perJob,
-        gdalExportParallelism: perJob
+        workersPerJob: perJob
       };
     }
   }

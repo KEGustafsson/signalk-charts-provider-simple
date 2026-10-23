@@ -12,7 +12,6 @@ interface ConvertJob {
 }
 
 interface S57StatusResponse {
-  podmanAvailable?: boolean;
   conversions?: Record<string, { status: string; message?: string; log?: string[] }>;
 }
 
@@ -23,7 +22,6 @@ interface ConvertUploadResponse {
 }
 
 let convertInitialized = false;
-let convertPodmanAvailable = false;
 const convertActiveJobs: Record<string, ConvertJob> = {};
 let convertPollInterval: ReturnType<typeof setInterval> | null = null;
 // Monotonic counter — Date.now() can collide when two files complete in
@@ -33,51 +31,27 @@ let nextConvertJobId = 0;
 
 window.handleConvertTabActive = function (): void {
   if (!convertInitialized) {
-    void initConvertTab();
+    initConvertTab();
   }
 };
 
-async function initConvertTab(): Promise<void> {
+function initConvertTab(): void {
   convertInitialized = true;
   const output = document.getElementById('convertOutput');
   if (!output) {
     return;
   }
 
-  // Check container runtime availability
-  try {
-    const resp = await fetch(`${CONVERT_API_BASE}/catalog-s57-status`);
-    if (resp.ok) {
-      const data = (await resp.json()) as S57StatusResponse;
-      convertPodmanAvailable = data.podmanAvailable ?? false;
-    }
-  } catch {
-    convertPodmanAvailable = false;
-  }
-
   output.innerHTML = `
     <div class="catalog-container">
-      ${
-        !convertPodmanAvailable
-          ? `
-        <div class="catalog-podman-warning">
-          <strong>Chart conversion unavailable.</strong>
-          Converting charts needs the
-          <a href="https://github.com/dirkwa/signalk-container" target="_blank" rel="noopener">signalk-container</a>
-          plugin (install it from the App Store) plus a Docker- or Podman-compatible
-          runtime on the host. Chart display works without it.
-          <a href="https://github.com/dirkwa/signalk-charts-provider-simple/blob/main/docs/running-in-docker.md" target="_blank" rel="noopener">See setup notes</a>.
-        </div>
-      `
-          : ''
-      }
       <div class="convert-section">
         <h2>Convert S-57 ENC Charts</h2>
         <p class="description">
           Upload a ZIP file containing S-57 ENC files (.000) from your national hydrographic office.
-          Charts will be converted to vector MBTiles using
-          <a href="https://gdal.org/" target="_blank" rel="noopener">GDAL</a> and
-          <a href="https://github.com/felt/tippecanoe" target="_blank" rel="noopener">tippecanoe</a> in Podman.
+          Charts are converted to vector MBTiles inside Signal K, with
+          <a href="https://gdal.org/" target="_blank" rel="noopener">GDAL</a> compiled to WebAssembly
+          (<a href="https://gdal3.js.org/" target="_blank" rel="noopener">gdal3.js</a>); no container
+          runtime is needed.
         </p>
         <div class="convert-upload-area" id="s57DropZone">
           <div class="convert-upload-icon">
@@ -108,8 +82,8 @@ async function initConvertTab(): Promise<void> {
         <h2>Convert BSB Raster Charts (RNC)</h2>
         <p class="description">
           Upload a ZIP file containing BSB raster charts (.kap files).
-          Charts will be converted to MBTiles using
-          <a href="https://gdal.org/" target="_blank" rel="noopener">GDAL</a> in Podman.
+          Charts are converted to MBTiles inside Signal K, with
+          <a href="https://gdal.org/" target="_blank" rel="noopener">GDAL</a> compiled to WebAssembly.
         </p>
         <div class="convert-upload-area" id="rncDropZone">
           <div class="convert-upload-icon">
@@ -179,12 +153,6 @@ function setupDropZone(zoneId: string, inputId: string): void {
   }
 
   zone.onclick = () => {
-    if (!convertPodmanAvailable) {
-      alert(
-        'Chart conversion needs the signalk-container plugin and a Docker- or Podman-compatible runtime. See the warning above.'
-      );
-      return;
-    }
     input.click();
   };
 
@@ -200,12 +168,6 @@ function setupDropZone(zoneId: string, inputId: string): void {
   zone.ondrop = (e) => {
     e.preventDefault();
     zone.classList.remove('dragover');
-    if (!convertPodmanAvailable) {
-      alert(
-        'Chart conversion needs the signalk-container plugin and a Docker- or Podman-compatible runtime. See the warning above.'
-      );
-      return;
-    }
     const dt = e.dataTransfer;
     if (!dt) {
       return;
