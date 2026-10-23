@@ -47,10 +47,12 @@ export type CustomOnlineChart = Static<typeof CustomOnlineChartSchema>;
 
 const OpacitySchema = Type.Number({ minimum: 0, maximum: 1 });
 /**
- * A masked version of a chart. "Water only" (`water-only`) cuts the land
- * away, so imagery underneath shows on land.
+ * A masked version of a chart, named for what it keeps. "Water only"
+ * (`water-only`) cuts the land away, so imagery underneath shows on land;
+ * "Land only" (`land-only`) cuts the water away, so imagery can lie on top of
+ * the other charts.
  */
-export const ChartMaskSchema = Type.Literal('water-only');
+export const ChartMaskSchema = Type.Union([Type.Literal('water-only'), Type.Literal('land-only')]);
 
 export type ChartMask = Static<typeof ChartMaskSchema>;
 
@@ -67,8 +69,22 @@ export type OnlineChartFile = Static<typeof OnlineChartFileSchema>;
 
 /** What a masked version's name and description say it is. */
 export const MASK_LABELS: Record<ChartMask, string> = {
-  'water-only': 'Water only'
+  'water-only': 'Water only',
+  'land-only': 'Land only'
 };
+
+/** What each masked version adds to its chart's description. */
+const MASK_DESCRIPTIONS: Record<ChartMask, string> = {
+  'water-only': 'Water only: the land is cut away, so a chart or imagery underneath shows there.',
+  'land-only':
+    'Land only: the water is cut away, so the charts underneath show there. Not for navigation: lakes and most rivers count as land, and it can cover rocks and buoys near the shore.'
+};
+
+/**
+ * Where a "Land only" version starts, whatever its chart's: it lies on top
+ * of the other charts, so they must show through until the user decides.
+ */
+const LAND_ONLY_OPACITY = 0.7;
 
 /** Credit the OSM land polygons' licence asks for, on every masked version. */
 export const LAND_ATTRIBUTION = 'Land polygons © OpenStreetMap contributors (ODbL)';
@@ -463,13 +479,16 @@ function maskedChartProvider(
       ? chart.tileSize
       : undefined;
   const url = `~tilePath~/${identifier}/{z}/{x}/{y}`;
+  // The file's own opacity wins; otherwise Land only starts at its fixed default.
+  const maskedOpacity =
+    file.defaultOpacity ?? (mask === 'land-only' ? LAND_ONLY_OPACITY : chart.defaultOpacity);
   return {
     _fileFormat: 'online',
     _filePath: filePath,
     _flipY: false,
     identifier,
     name: file.name,
-    description: `${entry.description} ${MASK_LABELS[mask]}: the land is cut away, so a chart or imagery underneath shows there. ${LAND_ATTRIBUTION}.`,
+    description: `${entry.description} ${MASK_DESCRIPTIONS[mask]} ${LAND_ATTRIBUTION}.`,
     bounds: [...entry.bbox],
     minzoom: chart.minzoom,
     maxzoom: chart.maxzoom,
@@ -477,9 +496,7 @@ function maskedChartProvider(
     type: 'tilelayer',
     scale: 250000,
     ...(tileSize !== undefined ? { tileSize } : {}),
-    ...(file.defaultOpacity !== undefined || chart.defaultOpacity !== undefined
-      ? { defaultOpacity: file.defaultOpacity ?? chart.defaultOpacity }
-      : {}),
+    ...(maskedOpacity !== undefined ? { defaultOpacity: maskedOpacity } : {}),
     _catalogId: entry.id,
     _offlineSource: source,
     _keepTiles: true,
