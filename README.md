@@ -1,6 +1,6 @@
 # Signal K Charts Provider Simple
 
-A lightweight Signal K server plugin for managing local nautical charts, written in strict TypeScript. Supports MBTiles, S-57 ENC, BSB raster, and world basemaps with automatic conversion via Docker- or Podman-managed containers.
+A lightweight Signal K server plugin for managing local nautical charts, written in strict TypeScript. Supports MBTiles, S-57 ENC, BSB raster, and world basemaps, with conversion built in: GDAL compiled to WebAssembly and a parallel vector tiler run inside Signal K, so no Docker, Podman or other runtime is needed.
 
 ## Features
 
@@ -47,11 +47,11 @@ Chart conversion (S-57 ENC, BSB raster, basemaps) is the only CPU-heavy thing th
 
 | Setting | What happens during a conversion | When to pick it |
 |---|---|---|
-| `single-core` | One job at a time, one thread; each `ogr2ogr` runs sequentially | Multi-tenant Pi (Signal K + Grafana + Node-RED + …) where keeping the rest of the box responsive matters more than conversion speed |
-| `half` (default) | `cpus/2` concurrent jobs, each tippecanoe gets `cpus / max-jobs` threads (typically ~2), `ogr2ogr` parallelizes to the same per-job ceiling | Balanced — leaves half the box for everything else. Matches the behaviour of plugin versions before 1.10 |
-| `all` | One full-throttle job using every core in both the GDAL export and tippecanoe stages; multi-bundle uploads queue serially | Dedicated chart-prep box, or when you just want a chart set to finish as fast as possible |
+| `single-core` | One job at a time on one worker thread | Multi-tenant Pi (Signal K + Grafana + Node-RED + …) where keeping the rest of the box responsive matters more than conversion speed |
+| `half` (default) | One job at a time on half the cores' worth of worker threads | Balanced — leaves half the box for everything else |
+| `all` | One full-throttle job with a worker thread per core; multi-bundle uploads queue serially | Dedicated chart-prep box, or when you just want a chart set to finish as fast as possible |
 
-The setting hot-applies — change it in the plugin config and Signal K will restart the plugin automatically; no server restart needed. In-flight conversions keep their already-spawned threads; the next conversion picks up the new budget.
+Conversion runs in worker threads, never on Signal K's event loop. The setting hot-applies — change it in the plugin config and Signal K will restart the plugin automatically; no server restart needed. In-flight conversions keep their workers; the next conversion picks up the new budget.
 
 ## Usage
 
@@ -117,7 +117,6 @@ The interface provides seven tabs:
    - Out-of-date detection when a source publishes a new edition or update of a cell, or your selection changes; the set lists the cells that changed
    - Each chart set keeps its downloaded cells, so an update downloads and reads only the cells that changed before building the chart again. The set's details show how much disk they take; deleting the set frees it
    - Chart sets made in the NOAA Charts tab of earlier versions carry over as they are. A set that includes other sources still opens in an earlier version, which shows only its NOAA part and drops the rest if it saves the set
-   - Container runtime (`signalk-container`) required, same as other conversions
 
 ### Supported Formats
 
@@ -125,11 +124,11 @@ The interface provides seven tabs:
 |--------|--------|-----------|--------|
 | **MBTiles** | Direct download | None needed | Raster or vector tiles |
 | **PMTiles** | Direct download, upload or the chart folder | None needed | Raster or vector tiles |
-| **S-57 ENC** (.000) | IENC catalogs, custom upload | GDAL + tippecanoe (containerized) | Vector MBTiles with S-52 styling |
-| **BSB Raster** (.kap) | RNC catalogs, custom upload | GDAL (containerized) | Raster MBTiles (PNG) |
-| **Pilot Charts** (.kap in .tar.xz) | Pilot catalog | GDAL (containerized) | Raster MBTiles (PNG) |
-| **GSHHG Basemap** | General catalog | GDAL (containerized) | Raster MBTiles (PNG) |
-| **OSM Basemap** | General catalog | GDAL (containerized) | Raster MBTiles (PNG) |
+| **S-57 ENC** (.000) | IENC catalogs, custom upload | GDAL (WebAssembly) + built-in vector tiler | Vector MBTiles with S-52 styling |
+| **BSB Raster** (.kap) | RNC catalogs, custom upload | GDAL (WebAssembly) | Raster MBTiles (PNG) |
+| **Pilot Charts** (.kap in .tar.xz) | Pilot catalog | GDAL (WebAssembly) | Raster MBTiles (PNG) |
+| **GSHHG Basemap** | General catalog | GDAL (WebAssembly) | Raster MBTiles (PNG) |
+| **OSM Basemap** | General catalog | GDAL (WebAssembly) | Raster MBTiles (PNG) |
 
 ### Compatible Chart Plotters
 
@@ -145,47 +144,13 @@ The interface provides seven tabs:
 
 The [`signalk-internet`](https://github.com/meri-imperiumi/signalk-internet) plugin tells Signal K whether the boat's connection is online, metered (for example satellite data billed per GB), offline or behind a sign-in page. While it reports metered, offline or a sign-in page, this plugin checks for nothing on its own (no chart catalog or ENC index checks, no resumed shoreline download) and online charts show only the tiles already kept on the server, without asking their provider. To keep fetching online chart tiles on a metered connection, turn on **Download online chart tiles on metered connections** in the plugin settings. Downloads you start yourself (Refresh, chart downloads, offline areas, chart sets) always run. Without `signalk-internet` nothing changes.
 
-### Recommended for chart conversion: `signalk-container` plugin
+### Chart conversion needs nothing extra
 
-Displaying charts (serving tiles from `.mbtiles`) needs nothing extra. The [`signalk-container`](https://github.com/dirkwa/signalk-container) plugin is only needed to **convert** charts (S-57 ENC, BSB raster, Pilot Charts, or basemaps), where this plugin delegates all container work to it. The Signal K App Store lists it as a recommended plugin on the Charts Provider Simple detail page and offers a one-click bulk install; without it the plugin still loads and serves charts — only the Convert tab is disabled.
+Converting charts (S-57 ENC, BSB raster, Pilot Charts, basemaps) runs inside the plugin: [GDAL](https://gdal.org/) compiled to WebAssembly ([gdal3.js](https://gdal3.js.org/)) reads the charts, and the plugin's own parallel vector tiler builds the MBTiles. There is no container runtime, helper image or companion plugin to install, and it works the same on a Raspberry Pi, bare metal, or with Signal K itself in Docker. See [docs/chart-conversion.md](docs/chart-conversion.md) for how it works.
 
-`signalk-container` itself needs a Docker- or Podman-compatible runtime on the host. Both engines work the same way; pick whichever is easier:
+Plugin versions 2.x converted in a helper container through the `signalk-container` plugin; that is no longer needed, and `signalk-container` can be removed if nothing else uses it. Chart sets keep their downloaded cells; their next update reads them again with the new GDAL once.
 
-```bash
-# Debian / Ubuntu / Raspberry Pi OS
-sudo apt install podman
-systemctl --user enable --now podman.socket
-
-# Fedora / RHEL
-sudo dnf install podman
-systemctl --user enable --now podman.socket
-```
-
-The plugin uses one combined image that `signalk-container` pulls automatically on first conversion:
-
-- `ghcr.io/dirkwa/signalk-charts-provider-simple/charts-toolbox:1.1.0` — GDAL + tippecanoe + tile-join + helpers in a single image (multi-arch: amd64 + arm64). The plugin pins to a specific `:VERSION` tag rather than `:latest` so a published image tag is permanent for any host that pulled it; bumping the toolbox image is a co-ordinated edit of `docker/charts-toolbox/VERSION` and the matching constant in `src/utils/container-images.ts`.
-
-**Why `signalk-container`?** It transparently handles the three deployment topologies that 1.x got wrong:
-
-- **Bare-metal Signal K** — straight bind mount of the data dir.
-- **Signal K in Docker / Podman with a named volume** — the helper container mounts the same named volume. (1.x couldn't do this; named-volume deployments were unable to convert.)
-- **Signal K in Docker / Podman with bind-mounted data** — the helper container gets the resolved host path, even when the in-container path doesn't match the host path. (1.x relied on host/container paths matching exactly; mismatches silently failed.)
-
-**Signal K running in Docker?** Runtime and socket setup is handled by `signalk-container` — see [docs/running-in-docker.md](docs/running-in-docker.md) for how conversion is delegated and where to configure the host.
-
-Conversion concurrency is configurable — see the [CPU budget](#cpu-budget-for-chart-conversion) section. MBTiles charts (display only, no conversion) work without any container runtime, and without `signalk-container`.
-
-### Standalone container image (third-party use)
-
-The same `charts-toolbox` image the plugin uses internally is also available for use **outside** Signal K — overnight NOAA region pipelines, ad-hoc shell-script automation, GitHub Actions workflows under your own account, etc.
-
-Pull it directly from GHCR:
-
-```bash
-docker pull ghcr.io/dirkwa/signalk-charts-provider-simple/charts-toolbox:1.1.0
-```
-
-See [docs/charts-toolbox-image.md](docs/charts-toolbox-image.md) for a quickstart, the `--user` / `--userns=keep-id` flag forms per runtime, and reproducibility notes.
+Conversion concurrency is configurable — see the [CPU budget](#cpu-budget-for-chart-conversion) section.
 
 ## Legal Notice
 

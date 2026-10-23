@@ -7,12 +7,13 @@
  * Reads the published index as its state: archives whose version is
  * unchanged are reused, so a scheduled run downloads only what changed.
  * Each archive read is also saved under `--work`, so an interrupted run
- * picks up where it stopped. GDAL runs in the charts-toolbox image, the
- * same pinned version locally and in CI, so both produce the same file.
+ * picks up where it stopped. GDAL is the plugin's own WebAssembly build
+ * (gdal3.js, pinned in package.json), so a local run, CI and the plugin read
+ * cells with the same GDAL.
  *
  * Writes `changed=true|false` to `$GITHUB_OUTPUT`.
  *
- * Needs Docker (or Podman) and a clone of chartcatalogs. After `npm run
+ * Needs a clone of chartcatalogs. After `npm run
  * build`, run `node dist/catalog/enc-index-cli.js` with:
  *
  *   --chartcatalogs <dir>    a clone of github.com/chartcatalogs/catalogs
@@ -30,24 +31,20 @@
  *                            published
  *   --max-minutes <n>        start no archive after n minutes
  *   --delay-ms <n>           pause between requests to one host (1000)
- *   --runtime <cmd>          docker (default) or podman
  *   --force                  publish past the drop guard
  */
 
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { Value } from 'typebox/value';
-import { CHARTS_TOOLBOX_IMAGE } from '../utils/container-images.js';
 import { NOAA_ENC_GEOJSON_URL, parseFootprints } from '../utils/noaa-enc-footprints.js';
+import { PoolAbortedError, TaskFailedError, withWorkerPool } from '../utils/worker-pool.js';
 import { extractZipSafely } from '../utils/zip-extract.js';
 import {
   CELL_MARKER,
@@ -106,24 +103,16 @@ const GDAL_TIMEOUT_MS = 10 * 60 * 1000;
 /** How long an archive already in progress may run past `--max-minutes`. */
 const DEADLINE_GRACE_MS = 10 * 60 * 1000;
 
-// Prints a marker line per cell, then the cell's scale, edition and update
-// number and its coverage polygons as GeoJSON text sequences. A cell whose
-// M_COVR is missing or empty (a few producers leave it out) has every
-// feature dumped instead, for an outline of where its data is. GDAL's S-57
-// driver applies any update files (.001, ...) next to the base cell before
-// reading. One unreadable cell must not fail the archive, hence the
-// `|| true`s.
-const GDAL_SCRIPT = `for f in "$@"; do
-  printf '${CELL_MARKER}%s\\n' "$f"
-  ogr2ogr -f GeoJSONSeq /vsistdout/ "/data/$f" DSID -select DSPM_CSCL,DSID_EDTN,DSID_UPDN || true
-  covr=$(ogr2ogr -f GeoJSONSeq /vsistdout/ "/data/$f" M_COVR -select CATCOV || true)
-  if [ -n "$covr" ]; then
-    printf '%s\\n' "$covr"
-  else
-    printf '${FEATURES_MARKER}\\n'
-    ogr2ogr -f GeoJSONSeq /vsistdout/ "/data/$f" -lco COORDINATE_PRECISION=3 || true
-  fi
-done`;
+// What GDAL reports per cell, as the report parser reads it: a marker line,
+// then the cell's scale, edition and update number and its coverage polygons
+// as GeoJSON text sequences. A cell whose M_COVR is missing or empty (a few
+// producers leave it out) has every feature dumped instead, for an outline of
+// where its data is. GDAL's S-57 driver applies any update files (.001, ...)
+// next to the base cell before reading. One unreadable layer or cell must
+// not fail the archive, so a failed read just reports nothing.
+const DSID_ARGS = ['-f', 'GeoJSONSeq', '-select', 'DSPM_CSCL,DSID_EDTN,DSID_UPDN', 'DSID'];
+const COVERAGE_ARGS = ['-f', 'GeoJSONSeq', '-select', 'CATCOV', 'M_COVR'];
+const FEATURES_ARGS = ['-f', 'GeoJSONSeq', '-lco', 'COORDINATE_PRECISION=3'];
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -405,70 +394,78 @@ function cellFileName(job: ArchiveJob): string {
   return `${job.title.replace(/[^\w-]+/g, '_') || 'cell'}.000`;
 }
 
-function runGdal(
-  runtime: string,
-  dir: string,
-  cells: string[],
-  name: string
-): Promise<CellReport[]> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      runtime,
-      [
-        'run',
-        '--rm',
-        '--name',
-        name,
-        '--network',
-        'none',
-        '-v',
-        `${dir}:/data:ro`,
-        CHARTS_TOOLBOX_IMAGE,
-        'sh',
-        '-c',
-        GDAL_SCRIPT,
-        'sh',
-        ...cells
-      ],
-      { stdio: ['ignore', 'pipe', 'pipe'] }
-    );
-    // Killing the CLI process would leave the container running, so a hung
-    // run is removed by name.
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      spawn(runtime, ['rm', '-f', name], { stdio: 'ignore' }).on('error', () => undefined);
-    }, GDAL_TIMEOUT_MS);
-    // Parsed as it streams: a cell without coverage dumps every feature,
-    // and an archive of such cells could be too big to hold as one string.
-    const parser = createGdalReportParser();
-    const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
-    lines.on('line', parser.line);
-    const linesDone = once(lines, 'close');
-    // Only awaited on a clean exit; on any other path the run has already
-    // failed, and a stream error must not surface as an unhandled rejection.
-    linesDone.catch(() => undefined);
-    let err = '';
-    child.stderr.on('data', (chunk: Buffer) => {
-      err = (err + chunk.toString()).slice(-4000);
-    });
-    child.on('error', (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      if (timedOut) {
-        reject(new Error(`GDAL took longer than ${String(GDAL_TIMEOUT_MS / 60000)} minutes`));
-      } else if (code === 0) {
-        linesDone.then(() => resolve(parser.finish()), reject);
-      } else {
-        reject(
-          new Error(`GDAL exited with ${String(code)}: ${err.trim().split('\n').pop() ?? ''}`)
-        );
+/**
+ * Read `cells` (paths relative to `dir`) with GDAL in a worker thread,
+ * feeding its output to the report parser line by line: a cell without
+ * coverage dumps every feature, too much to hold for a whole archive.
+ */
+async function runGdal(dir: string, cells: string[]): Promise<CellReport[]> {
+  const parser = createGdalReportParser();
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'enc-index-gdal-'));
+  const out = path.join(scratch, 'out.geojsonl');
+  const timeout = new AbortController();
+  const timer = setTimeout(() => {
+    timeout.abort();
+  }, GDAL_TIMEOUT_MS);
+  try {
+    await withWorkerPool(1, timeout.signal, async (pool) => {
+      // The lines GDAL wrote for one read, or none when it failed.
+      const read = async (cell: string, args: string[]): Promise<string[]> => {
+        try {
+          await pool.run({
+            op: 'gdal-vector-translate',
+            source: { path: path.join(dir, cell) },
+            dst: out,
+            args
+          });
+        } catch (err) {
+          if (!(err instanceof TaskFailedError)) {
+            throw err;
+          }
+          // A single-layer format stops at the second layer of a full dump;
+          // what it wrote before that still counts.
+        }
+        try {
+          return fs
+            .readFileSync(out, 'utf8')
+            .split('\n')
+            .filter((line) => line.trim() !== '');
+        } catch {
+          return [];
+        } finally {
+          fs.rmSync(out, { force: true });
+        }
+      };
+      for (const cell of cells) {
+        parser.line(`${CELL_MARKER}${cell}`);
+        for (const line of await read(cell, DSID_ARGS)) {
+          parser.line(line);
+        }
+        const coverage = await read(cell, COVERAGE_ARGS);
+        if (coverage.length > 0) {
+          for (const line of coverage) {
+            parser.line(line);
+          }
+        } else {
+          parser.line(FEATURES_MARKER);
+          for (const line of await read(cell, FEATURES_ARGS)) {
+            parser.line(line);
+          }
+        }
       }
     });
-  });
+  } catch (err) {
+    if (err instanceof PoolAbortedError) {
+      throw new Error(`GDAL took longer than ${String(GDAL_TIMEOUT_MS / 60000)} minutes`, {
+        cause: err
+      });
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+  return parser.finish();
 }
 
 /** What GDAL reported for one downloaded archive. */
@@ -483,7 +480,6 @@ interface ArchiveReport {
 async function readArchive(
   job: ArchiveJob,
   tmp: string,
-  runtime: string,
   stop?: AbortSignal
 ): Promise<ArchiveReport> {
   fs.rmSync(tmp, { recursive: true, force: true });
@@ -510,12 +506,7 @@ async function readArchive(
     }
     return {
       kind,
-      reports: await runGdal(
-        runtime,
-        contents,
-        cells,
-        `enc-index-${path.basename(tmp)}-${String(process.pid)}`
-      ),
+      reports: await runGdal(contents, cells),
       updateFiles
     };
   } finally {
@@ -569,7 +560,6 @@ class WorkCache {
 }
 
 interface BuildOptions {
-  runtime: string;
   work: string;
   delayMs: number;
   /** No archive is started after this time (epoch ms). */
@@ -624,7 +614,6 @@ async function buildJobs(
           const report = await readArchive(
             job,
             path.join(options.work, 'tmp', hashKey(key)),
-            options.runtime,
             options.stop
           );
           cache.put(job, report);
@@ -691,7 +680,6 @@ async function main(): Promise<void> {
       'max-minutes': { type: 'string' },
       'direct-sources': { type: 'string' },
       'delay-ms': { type: 'string', default: '1000' },
-      runtime: { type: 'string', default: 'docker' },
       force: { type: 'boolean', default: false }
     }
   });
@@ -754,7 +742,6 @@ async function main(): Promise<void> {
   let outcome: Awaited<ReturnType<typeof buildJobs>>;
   try {
     outcome = await buildJobs(pending, {
-      runtime: values.runtime,
       work,
       delayMs: positiveNumber('--delay-ms', values['delay-ms']),
       deadline: Date.now() + budgetMs,

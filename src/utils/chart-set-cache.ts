@@ -45,7 +45,11 @@ const SAFE_CELL = /^[A-Za-z0-9_-]{1,64}$/;
 export interface CachedCellInfo {
   version: string | undefined;
   exportRevision: number;
-  /** The GDAL image that exported it; its output depends on GDAL's version. */
+  /**
+   * The GDAL build that exported it (gdal-wasm.ts `gdalBuildId`; a
+   * charts-toolbox image name for cells kept by 2.x), since its output
+   * depends on GDAL's version.
+   */
   image: string | undefined;
   /** Bytes the cell's entry takes on disk. */
   bytes: number;
