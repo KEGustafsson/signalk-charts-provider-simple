@@ -1,4 +1,4 @@
-/* Custom Catalogs tab — two-column layout (saved catalogs + selectable map). */
+/* ENC Charts tab — two-column layout (saved chart sets + selectable map). */
 
 .cc-container {
   display: flex;
@@ -271,6 +271,51 @@
   font-size: 0.85rem;
   color: var(--md-sys-color-on-surface-variant, #43474e);
   margin-bottom: 8px;
+}
+
+.cc-missing {
+  margin: 6px 0;
+  font-size: 0.85rem;
+  color: var(--md-sys-color-error, #ba1a1a);
+}
+
+.cc-link-btn {
+  border: none;
+  background: none;
+  padding: 0 4px;
+  font: inherit;
+  color: var(--md-sys-color-primary, #1565c0);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* Text flow, so the button follows the instructions' last word. */
+.cc-map-tools {
+  margin-bottom: 8px;
+  line-height: 2.2;
+}
+
+.cc-map-tools .cc-btn {
+  margin-left: 6px;
+  vertical-align: middle;
+  line-height: normal;
+}
+
+/* Same emphasis as the "Chart sets" heading: the map's instructions. */
+.cc-map-hint {
+  font-weight: 600;
+  font-size: 1.05rem;
+  color: var(--md-sys-color-on-surface, #1a1c1e);
+}
+
+.cc-btn.cc-btn-active {
+  background: var(--md-sys-color-secondary-container, #dbe3f0);
+  border-color: var(--md-sys-color-primary, #1565c0);
+}
+
+/* While picking by box, touch drags draw the box instead of panning. */
+.cc-map.cc-selecting {
+  touch-action: none;
 }
 
 .cc-map {
