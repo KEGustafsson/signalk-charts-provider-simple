@@ -148,7 +148,7 @@ The [`signalk-internet`](https://github.com/meri-imperiumi/signalk-internet) plu
 
 Converting charts (S-57 ENC, BSB raster, Pilot Charts, basemaps) runs inside the plugin: [GDAL](https://gdal.org/) compiled to WebAssembly ([gdal3.js](https://gdal3.js.org/)) reads the charts, and the plugin's own parallel vector tiler builds the MBTiles. There is no container runtime, helper image or companion plugin to install, and it works the same on a Raspberry Pi, bare metal, or with Signal K itself in Docker. See [docs/chart-conversion.md](docs/chart-conversion.md) for how it works.
 
-Plugin versions 2.x converted in a helper container through the `signalk-container` plugin; that is no longer needed, and `signalk-container` can be removed if nothing else uses it. Chart sets keep their downloaded cells; their next update reads them again with the new GDAL once.
+Earlier versions converted in a helper container through the `signalk-container` plugin; that is no longer needed, and `signalk-container` can be removed if nothing else uses it. Chart sets keep their downloaded cells; their next update reads them again with the new GDAL once.
 
 Conversion concurrency is configurable — see the [CPU budget](#cpu-budget-for-chart-conversion) section.
 

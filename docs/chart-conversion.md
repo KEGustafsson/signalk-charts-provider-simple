@@ -95,9 +95,10 @@ Two details make the shards cheap:
 
 Geometry is kept as it is: no simplification, no dropped small polygons, no
 feature or tile size limits, and a generous tile buffer (`TILE_BUFFER` in
-`vector-tiler.ts`), so that harbour basins and narrow channels survive. List attributes (`COLOUR`, `CATLIT`, …) are
-joined with commas and null attributes dropped. The MBTiles `json` metadata lists every layer with its
-zoom range and attribute types.
+`vector-tiler.ts`), so that harbour basins and narrow channels survive. List
+attributes (`COLOUR`, `CATLIT`, …) are joined with commas and null attributes
+dropped. The MBTiles `json` metadata lists every layer with its zoom range and
+attribute types.
 
 ## Raster charts and basemaps
 
