@@ -102,12 +102,12 @@ attribute types.
 
 ## Raster charts and basemaps
 
-A BSB/KAP chart is tiled by `gdal_translate -of MBTiles` (PNG tiles) at its
-native zoom, then overview zooms are added below it (`OVERVIEW_LEVELS` in
-`rnc-converter.ts`); a basemap shapefile is rasterized to a world GeoTIFF,
-tiled, and given overview zooms of its own (`BASEMAP_OVERVIEW_LEVELS` in
-`s57-converter.ts`). The overview tiles are box-downsampled from the four tiles below,
-like `gdaladdo -r average`, in the workers.
+GDAL's translate API, called in the workers, tiles a BSB/KAP chart into a PNG
+MBTiles at its native zoom. Overview zooms are then added below it
+(`OVERVIEW_LEVELS` in `rnc-converter.ts`). A basemap shapefile is rasterized
+to a world GeoTIFF, tiled the same way, and given overview zooms of its own
+(`BASEMAP_OVERVIEW_LEVELS` in `s57-converter.ts`). Each overview tile is the
+average of the four tiles below it, computed in the workers.
 
 ## Caches and versions
 
