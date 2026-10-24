@@ -5,8 +5,8 @@
  * `<dataDir>/chart-set-cache/<setId>/cells/<cell>/` holds the cell as it was
  * staged (`raw/`: the `.000` and its update files), its GDAL output
  * (`geojson/<LAYER>__<cell>.geojson.gz`) and `cell.json`, which records the
- * version and the export revision. Building the final MBTiles (tippecanoe
- * and tile-join) still runs over every cell of the set.
+ * version and the export revision. Building the final MBTiles (the vector
+ * tiler, vector-tiler.ts) still runs over every cell of the set.
  *
  * A cell is built in the set's staging dir and renamed into place with its
  * `cell.json` already written, so a cancelled or failed run never leaves a
