@@ -100,6 +100,25 @@ const isChartFile = (file: string, extensions: readonly string[]): boolean =>
   extensions.includes(path.extname(file).toLowerCase()) && !path.basename(file).startsWith('._');
 
 /**
+ * The `.mbtiles` name for each chart: its file name, numbered on (`-2`, `-3`,
+ * …) where charts share one. Archives keep their folders, so two charts can
+ * share a file name, and they convert side by side, so they must not write
+ * the same output. Case-insensitive, for case-insensitive file systems.
+ */
+export function chartOutputNames(files: readonly string[]): string[] {
+  const taken = new Set<string>();
+  return files.map((file) => {
+    const base = path.basename(file, path.extname(file));
+    let name = `${base}.mbtiles`;
+    for (let i = 2; taken.has(name.toLowerCase()); i++) {
+      name = `${base}-${String(i)}.mbtiles`;
+    }
+    taken.add(name.toLowerCase());
+    return name;
+  });
+}
+
+/**
  * Convert BSB/KAP charts to raster MBTiles in `chartsDir`, one per chart, on
  * the conversion's worker threads: GDAL (WebAssembly) tiles each chart at its
  * native zoom, then overview zooms are built below it. A chart that fails is
@@ -111,12 +130,13 @@ async function convertKapFiles(
   chartNumber: string
 ): Promise<string[]> {
   const converted: (string | null)[] = kapFiles.map(() => null);
+  const outputNames = chartOutputNames(kapFiles);
   let started = 0;
   await withWorkerPool(getCpuBudget().workersPerJob, undefined, async (pool) => {
     await forEachConcurrent(kapFiles, pool.size, async (kap, index) => {
       started++;
       const friendly = path.basename(kap);
-      const outputName = `${path.basename(kap, path.extname(kap))}.mbtiles`;
+      const outputName = outputNames[index];
       const outputPath = path.join(chartsDir, outputName);
       appendLog(chartNumber, `PROGRESS: Converting ${friendly} (${started}/${kapFiles.length})`);
       setConvertProgress(

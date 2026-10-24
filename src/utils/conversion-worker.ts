@@ -122,8 +122,13 @@ function exportS57Cell(g: GdalWasm, task: S57CellTask): TaskResult {
   const name = path.basename(task.cell, path.extname(task.cell));
   const errors: string[] = [];
   const fail = (err: unknown): void => {
-    errors.push(...(err instanceof GdalError ? err.gdalLog : []));
-    errors.push(`${name}: ${err instanceof Error ? err.message : String(err)}`);
+    // Anything but a GDAL error (a WebAssembly trap or abort) leaves the
+    // instance unusable: fail the task, so the worker reloads GDAL.
+    if (!(err instanceof GdalError)) {
+      throw err;
+    }
+    errors.push(...err.gdalLog);
+    errors.push(`${name}: ${err.message}`);
   };
   let layers: string[];
   try {
@@ -157,8 +162,8 @@ function exportS57Cell(g: GdalWasm, task: S57CellTask): TaskResult {
       files++;
     } catch (err) {
       complete = false;
-      fail(err);
       fs.rmSync(dst, { force: true });
+      fail(err);
     }
     g.drainLog();
   }
@@ -227,6 +232,11 @@ parentPort?.on('message', ({ id, task }: WorkerRequest) => {
       parentPort?.postMessage(reply, transferables(result));
     },
     (err: unknown) => {
+      if (!(err instanceof GdalError)) {
+        // A trap or an Emscripten abort may have left the GDAL instance
+        // broken; the next GDAL task loads a fresh one.
+        gdal = null;
+      }
       const reply: WorkerReply = {
         id,
         type: 'error',

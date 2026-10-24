@@ -145,7 +145,20 @@ export class WorkerPool {
         return;
       }
       if (reply.type === 'event') {
-        current.onEvent?.(reply.event);
+        try {
+          current.onEvent?.(reply.event);
+        } catch (err) {
+          // A failing consumer (a full disk under the tile sink, say) fails
+          // this task; it must not throw out of the listener, where it would
+          // take the server down. The worker goes, mid-task.
+          this.workers.splice(this.workers.indexOf(entry), 1);
+          entry.current = null;
+          current.reject(err instanceof Error ? err : new Error('Task event failed'));
+          void entry.worker.terminate();
+          if (!this.closed) {
+            this.dispatch();
+          }
+        }
         return;
       }
       entry.current = null;
@@ -157,14 +170,16 @@ export class WorkerPool {
       this.dispatch();
     });
     // A crashed worker (an aborted WASM instance, an out-of-memory heap)
-    // fails its task only; the next task gets a fresh worker.
+    // fails its task only, as a TaskFailedError like any other failed task,
+    // so callers skip the one cell or chart; the next task gets a fresh
+    // worker.
     const fail = (err: Error): void => {
       const index = this.workers.indexOf(entry);
       if (index < 0) {
         return;
       }
       this.workers.splice(index, 1);
-      entry.current?.reject(err);
+      entry.current?.reject(new TaskFailedError(err.message, []));
       entry.current = null;
       if (!this.closed) {
         this.dispatch();

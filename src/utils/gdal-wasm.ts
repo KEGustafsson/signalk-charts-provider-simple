@@ -272,10 +272,18 @@ export async function loadGdalWasm(): Promise<GdalWasm> {
       if (!out || (fn.lastErrorType() as number) >= CE_FAILURE) {
         throw failure(what);
       }
+      // Closing flushes the output (the GeoJSON writer's closing bracket,
+      // the MBTiles commit); a failure there is a failed write.
+      const written = out;
+      out = 0;
+      fn.errorReset();
+      fn.close(written);
+      if ((fn.lastErrorType() as number) >= CE_FAILURE) {
+        throw failure(`${what} (closing the output)`);
+      }
     } finally {
       freeOptions(options);
       if (out) {
-        // Closing flushes the output; a failure there is a failed write.
         fn.close(out);
       }
     }

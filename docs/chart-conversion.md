@@ -6,12 +6,6 @@ be installed: no Docker or Podman, no helper container image, no
 `signalk-container` plugin, no GDAL or tippecanoe on the host. A Raspberry Pi,
 a Signal K container and a bare-metal server convert the same way.
 
-Up to 2.x every conversion ran GDAL and tippecanoe in a helper container,
-which needed a container runtime on the host and a peer plugin to reach it,
-and failed in ways that were hard to diagnose (socket permissions, host paths
-that differ from the paths Signal K sees, the file ownership of a rootless
-container).
-
 ## The pieces
 
 ```
@@ -60,8 +54,7 @@ GDAL exports each cell's layers to `<LAYER>__<cell>.geojson`, one cell per
 worker at a time. The export then becomes the tiler's sources, one per layer
 and band, each shown at that band's zooms within the user's range
 (`planTileSources`, `BAND_MIN_ZOOM` / `BAND_MAX_ZOOM` in `s57-band.ts`). The
-tiler builds the whole bundle in one pass. 2.x ran one tippecanoe pass per band
-and joined the results with tile-join; there is no join step now.
+tiler builds the whole bundle in one pass, with no per-band runs to join.
 
 ## The vector tiler
 
@@ -100,17 +93,10 @@ Two details make the shards cheap:
   geojson-vt would clamp latitudes or wrap copies across the antimeridian.
 
 Geometry is kept as it is: no simplification, no dropped small polygons, no
-feature or tile size limits, and a buffer of 80/256 of a tile — the settings
-2.x gave tippecanoe so that harbour basins and narrow channels survive. List
-attributes (`COLOUR`, `CATLIT`, …) are joined with commas and null attributes
-dropped, as before. The MBTiles `json` metadata lists every layer with its
+feature or tile size limits, and a buffer of 80/256 of a tile, so that harbour
+basins and narrow channels survive. List attributes (`COLOUR`, `CATLIT`, …) are
+joined with commas and null attributes dropped. The MBTiles `json` metadata lists every layer with its
 zoom range and attribute types.
-
-On the 48-cell NOAA Rhode Island bundle (17 MB of S-57, z9-z16) the tiler
-writes the same 24,380 tiles as the reference run without re-rooting, with the
-same polygon coverage when sampled tile by tile, and matches GDAL's own MVT
-writer to within edge quantization. GDAL export plus tiling takes about 25 s
-on four cores.
 
 ## Raster charts and basemaps
 
@@ -124,6 +110,6 @@ like `gdaladdo -r average`, in the workers.
 
 The chart-set cache keeps each cell's GeoJSON between runs, keyed by the
 GDAL build that wrote it (`gdalBuildId()`, the pinned gdal3.js version). A
-new gdal3.js version, or a cache written by 2.x's toolbox image, makes the
-next update export its cells again. The ENC index builder
+GeoJSON written by another GDAL build makes the next update export its cell
+again. The ENC index builder
 (`src/catalog/enc-index-cli.ts`) reads cells with the same GDAL.
