@@ -59,8 +59,10 @@ tiler builds the whole bundle in one pass, with no per-band runs to join.
 ## The vector tiler
 
 The tiler takes GeoJSON files, each with an output layer and a zoom range, and
-writes an MBTiles. It is built so that every step runs on the workers and none
-holds a whole bundle in memory.
+writes an MBTiles. The heavy steps (reading the GeoJSON, sorting features into
+shards, tiling and encoding) run on the workers; the main thread plans the
+work and writes the finished tiles into SQLite. No step holds a whole bundle
+in memory.
 
 1. **Bucket.** Workers read the GeoJSON files and sort each feature into the
    *shards* it reaches. A shard is the subtree of the tile pyramid under one
@@ -106,8 +108,9 @@ GDAL's translate API, called in the workers, tiles a BSB/KAP chart into a PNG
 MBTiles at its native zoom. Overview zooms are then added below it
 (`OVERVIEW_LEVELS` in `rnc-converter.ts`). A basemap shapefile is rasterized
 to a world GeoTIFF, tiled the same way, and given overview zooms of its own
-(`BASEMAP_OVERVIEW_LEVELS` in `s57-converter.ts`). Each overview tile is the
-average of the four tiles below it, computed in the workers.
+(`BASEMAP_OVERVIEW_LEVELS` in `s57-converter.ts`). Each overview tile is
+averaged, in the workers, from the tiles below it; a quarter with no tile
+below it stays transparent.
 
 ## Caches and versions
 
