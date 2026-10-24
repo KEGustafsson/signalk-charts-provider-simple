@@ -42,14 +42,7 @@ const MAX_LOG_LINES = MAX_CATALOG_MANAGER_LOG_LINES;
 export type CustomCatalogStatus = 'empty' | 'out_of_date' | 'downloaded' | 'converted';
 
 export type CustomCatalogPhase =
-  | 'preparing'
-  | 'downloading'
-  | 'converting'
-  | 'joining'
-  | 'completed'
-  | 'cancelling'
-  | 'cancelled'
-  | 'failed';
+  'preparing' | 'downloading' | 'converting' | 'completed' | 'cancelling' | 'cancelled' | 'failed';
 
 /** Structured progress that drives the Custom Catalogs UI (two bars + map). */
 export interface CustomCatalogProgressDetail {
