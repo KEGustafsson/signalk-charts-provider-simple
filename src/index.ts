@@ -224,6 +224,8 @@ const PLUGIN_ID = 'signalk-charts-provider-simple';
 // Small enough for the SD card of a Raspberry Pi, large enough for a cruising area at harbour zoom.
 const DEFAULT_ONLINE_CACHE_LIMIT_MB = 2048;
 const DEFAULT_MASKED_CACHE_LIMIT_MB = 1024;
+// How long after the charts load the chart-directory sweep starts.
+const SWEEP_DELAY_MS = 30_000;
 // Tile URLs live under the Signal K v1 charts namespace so non-admin
 // users (readwrite/readonly) can fetch tiles. Routes under /plugins/* are
 // gated by adminAuthenticationMiddleware in the server, which blocks tile
@@ -309,6 +311,9 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
   // Off between stop() and the next start, so a late refresh (a finished
   // download, say) can't restart polling for a stopped plugin.
   let onlineTimeActive = false;
+  // The startup chart-directory sweep, pending until SWEEP_DELAY_MS after
+  // the charts load; cleared by stop().
+  let sweepTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** A client read these charts: keep their timelines fresh while it does. */
   const touchOnlineTime = (providers: Iterable<ChartProvider>): void => {
@@ -501,6 +506,10 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     stop: () => {
       lifecycle++;
       stopped = true;
+      if (sweepTimer) {
+        clearTimeout(sweepTimer);
+        sweepTimer = null;
+      }
       setCatalogChangedListener(null);
       internet?.stop();
       internet = null;
@@ -906,8 +915,17 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     // never delay chart listing. It rescans the chart directory itself
     // rather than reusing the startup snapshot — charts may have been
     // uploaded/downloaded/converted since, and a stale snapshot would
-    // delete them as "invalid".
-    void cleanupChartDirectory(chartPath);
+    // delete them as "invalid". It waits a while first: housekeeping is
+    // never urgent, and a lifecycle that ends sooner (Signal K restarts
+    // the plugin on each config save) then never opens the chart files a
+    // second time, which on Windows would keep them locked past stop().
+    if (started === lifecycle) {
+      sweepTimer = setTimeout(() => {
+        sweepTimer = null;
+        void cleanupChartDirectory(chartPath);
+      }, SWEEP_DELAY_MS);
+      sweepTimer.unref();
+    }
   };
 
   // A chart is served only when its own flag AND every ancestor folder's
