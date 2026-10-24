@@ -61,6 +61,8 @@ export interface RunOptions {
 export class WorkerPool {
   private readonly workers: PoolWorker[] = [];
   private readonly queue: Pending[] = [];
+  /** Workers being terminated, which close() waits for. */
+  private readonly stopping: Promise<unknown>[] = [];
   private nextId = 0;
   private closed = false;
   private readonly onAbort = (): void => {
@@ -100,7 +102,9 @@ export class WorkerPool {
   async close(): Promise<void> {
     this.signal?.removeEventListener('abort', this.onAbort);
     this.terminate(new Error('Worker pool is closed'));
-    await Promise.resolve();
+    // Only once every worker has exited may the caller remove the
+    // directories they were writing to.
+    await Promise.allSettled(this.stopping);
   }
 
   private terminate(reason: Error): void {
@@ -111,7 +115,7 @@ export class WorkerPool {
     for (const entry of this.workers.splice(0)) {
       entry.current?.reject(reason);
       entry.current = null;
-      void entry.worker.terminate();
+      this.stopping.push(entry.worker.terminate());
     }
   }
 
@@ -154,7 +158,7 @@ export class WorkerPool {
           this.workers.splice(this.workers.indexOf(entry), 1);
           entry.current = null;
           current.reject(err instanceof Error ? err : new Error('Task event failed'));
-          void entry.worker.terminate();
+          this.stopping.push(entry.worker.terminate());
           if (!this.closed) {
             this.dispatch();
           }

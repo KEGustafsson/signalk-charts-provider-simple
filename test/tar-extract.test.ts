@@ -165,6 +165,20 @@ describe('extractTarArchive', () => {
     );
   });
 
+  it('holds long-name and PAX header data to the size budget', async () => {
+    const file = archive(
+      'meta-bomb.tar',
+      tar([
+        { name: 'PaxHeader', type: 'x', data: paxRecord('comment', 'c'.repeat(5000)) },
+        { name: 'short', data: 'pax' }
+      ])
+    );
+    await assert.rejects(
+      extractTarArchive(file, path.join(tmp, 'meta-bomb'), { maxTotalBytes: 1000 }),
+      /expands past/
+    );
+  });
+
   it('rejects a truncated archive', async () => {
     const whole = tar([{ name: 'cut.bin', data: 'z'.repeat(3000) }]);
     const file = archive('cut.tar', whole.subarray(0, 1024));

@@ -119,6 +119,9 @@ const getGdal = (): Promise<GdalWasm> => (gdal ??= loadGdalWasm());
 const SOUNDG_OPEN_OPTIONS = ['SPLIT_MULTIPOINT=YES', 'ADD_SOUNDG_DEPTH=YES'];
 
 function exportS57Cell(g: GdalWasm, task: S57CellTask): TaskResult {
+  // A failure copies the log rather than draining it: start clean, so no
+  // earlier task's messages are reported as this cell's.
+  g.drainLog();
   const name = path.basename(task.cell, path.extname(task.cell));
   const errors: string[] = [];
   const fail = (err: unknown): void => {

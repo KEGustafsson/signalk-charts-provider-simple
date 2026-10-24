@@ -12,7 +12,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { Readable } from 'node:stream';
+import { Readable, pipeline } from 'node:stream';
 import zlib from 'node:zlib';
 import xz from 'xz-decompress';
 import { isWithinBase } from './path-safety.js';
@@ -42,7 +42,11 @@ function openTarStream(archive: string): Readable {
     return Readable.fromWeb(new xz.XzReadableStream(web));
   }
   if (startsWith(head, GZIP_MAGIC)) {
-    return raw.pipe(zlib.createGunzip());
+    // pipeline, not pipe: destroying the gunzip stream then closes the file,
+    // and a read error reaches the reader instead of going unhandled.
+    const gunzip = zlib.createGunzip();
+    pipeline(raw, gunzip, () => {});
+    return gunzip;
   }
   return raw;
 }
@@ -156,6 +160,10 @@ export async function extractTarArchive(
     padding = (BLOCK - (size % BLOCK)) % BLOCK;
 
     if (type === 'L' || type === 'x') {
+      // Buffered in memory, so held to the archive's limit before reading.
+      if (size > maxTotal) {
+        throw new ZipLimitError(`Archive expands past ${String(maxTotal)} bytes`);
+      }
       meta = [];
       metaKind = type === 'L' ? 'longname' : 'pax';
       return;

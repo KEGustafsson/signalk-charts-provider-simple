@@ -84,9 +84,10 @@ Two details make the shards cheap:
 - **Re-rooting.** geojson-vt starts every index at the world tile, so a z12
   shard would clip and transform its features through twelve levels before
   reaching its own tile. Each shard instead rescales its coordinates so that
-  its tile becomes the z3 tile (3, 3, 3). Scaling by a power of two keeps
-  every tile boundary, so the tiles are the same, after three levels of work
-  instead of twelve.
+  its tile becomes a tile at a fixed shallow zoom (`ROOT_Z` in
+  `vector-tile-shard.ts`). Scaling by a power of two keeps every tile
+  boundary, so the tiles are the same, after a few levels of work instead of
+  twelve.
 - **Exact pre-clipping.** Before re-rooting, each feature is clipped to the
   shard plus its buffer, which is exactly where geojson-vt would clip it at
   the shard's tile. Nothing then reaches the edge of the rescaled world, where
@@ -101,9 +102,10 @@ zoom range and attribute types.
 ## Raster charts and basemaps
 
 A BSB/KAP chart is tiled by `gdal_translate -of MBTiles` (PNG tiles) at its
-native zoom, then four overview zooms are added below it; a basemap
-shapefile is rasterized to a world GeoTIFF, tiled, and given eight overview
-zooms. The overview tiles are box-downsampled from the four tiles below,
+native zoom, then overview zooms are added below it (`OVERVIEW_LEVELS` in
+`rnc-converter.ts`); a basemap shapefile is rasterized to a world GeoTIFF,
+tiled, and given overview zooms of its own (`BASEMAP_OVERVIEW_LEVELS` in
+`s57-converter.ts`). The overview tiles are box-downsampled from the four tiles below,
 like `gdaladdo -r average`, in the workers.
 
 ## Caches and versions
