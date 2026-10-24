@@ -93,8 +93,8 @@ Two details make the shards cheap:
   geojson-vt would clamp latitudes or wrap copies across the antimeridian.
 
 Geometry is kept as it is: no simplification, no dropped small polygons, no
-feature or tile size limits, and a buffer of 80/256 of a tile, so that harbour
-basins and narrow channels survive. List attributes (`COLOUR`, `CATLIT`, …) are
+feature or tile size limits, and a generous tile buffer (`TILE_BUFFER` in
+`vector-tiler.ts`), so that harbour basins and narrow channels survive. List attributes (`COLOUR`, `CATLIT`, …) are
 joined with commas and null attributes dropped. The MBTiles `json` metadata lists every layer with its
 zoom range and attribute types.
 
