@@ -174,9 +174,9 @@ merged catalog, because a Pages deployment replaces the whole site.
   pause between requests. Different hosts run side by side.
 - **Identical output everywhere.** GDAL is the plugin's own WebAssembly
   build (gdal3.js, `docs/chart-conversion.md`) at the version `package.json`
-  pins. Coordinates
-  are simplified and rounded by fixed rules, and everything is sorted. So a
-  maintainer's machine and CI produce the same file and content hash.
+  pins. Coordinates are simplified and rounded by fixed rules, and everything
+  is sorted. So a maintainer's machine and CI produce the same file and
+  content hash.
 
 ## The first build
 
