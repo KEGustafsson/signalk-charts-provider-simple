@@ -858,7 +858,13 @@ async function downloadFile(
         const location = response.headers.location;
         if (status >= 300 && status < 400 && location && redirects < 5) {
           response.resume();
-          request(new URL(location, target).toString(), redirects + 1);
+          // A bad Location, or one off https, throws here, inside the
+          // response listener; fail the download rather than the process.
+          try {
+            request(new URL(location, target).toString(), redirects + 1);
+          } catch (err) {
+            reject(err instanceof Error ? err : new Error(String(err)));
+          }
           return;
         }
         if (status !== 200) {
