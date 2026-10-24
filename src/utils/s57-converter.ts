@@ -804,7 +804,11 @@ async function rasterizeLandToMbtiles(opts: {
       '-of',
       'GTiff',
       '-co',
-      'COMPRESS=LZW'
+      'COMPRESS=LZW',
+      // The high and full GSHHG resolutions are far past 4 GB uncompressed;
+      // a classic TIFF could not hold them.
+      '-co',
+      'BIGTIFF=IF_SAFER'
     ]
   });
   logGdal(rasterized.log);
