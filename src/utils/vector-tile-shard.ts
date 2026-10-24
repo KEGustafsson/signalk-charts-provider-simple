@@ -72,32 +72,37 @@ const tileId = (z: number, x: number, y: number): number => ((1 << z) * y + x) *
 // Read `file` line by line in large chunks: far cheaper than readline for
 // the many short-lived shard files, without holding a whole file as one
 // string (a shard of a large bundle can pass V8's string size limit).
-function forEachLine(file: string, onLine: (line: string) => void): void {
+export function forEachLine(
+  file: string,
+  onLine: (line: string) => void,
+  chunkBytes = 16 * 1024 * 1024
+): void {
   const fd = fs.openSync(file, 'r');
   try {
-    const chunk = Buffer.alloc(16 * 1024 * 1024);
-    let carry = '';
+    const chunk = Buffer.alloc(chunkBytes);
+    // The partial last line of a read, kept as bytes: the read boundary may
+    // fall inside a multi-byte character, so only whole lines are decoded.
+    let carry: Buffer = Buffer.alloc(0);
     for (;;) {
       const n = fs.readSync(fd, chunk, 0, chunk.length, null);
       if (n === 0) {
         break;
       }
-      // Cut at the last newline so a multi-byte character is never split.
       const end = chunk.lastIndexOf(0x0a, n - 1);
       if (end < 0) {
-        carry += chunk.toString('utf8', 0, n);
+        carry = Buffer.concat([carry, chunk.subarray(0, n)]);
         continue;
       }
-      const text = carry + chunk.toString('utf8', 0, end);
-      carry = chunk.toString('utf8', end + 1, n);
+      const text = Buffer.concat([carry, chunk.subarray(0, end)]).toString('utf8');
+      carry = Buffer.from(chunk.subarray(end + 1, n));
       for (const line of text.split('\n')) {
         if (line) {
           onLine(line);
         }
       }
     }
-    if (carry) {
-      onLine(carry);
+    if (carry.length > 0) {
+      onLine(carry.toString('utf8'));
     }
   } finally {
     fs.closeSync(fd);

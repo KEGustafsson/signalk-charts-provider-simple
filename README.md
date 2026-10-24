@@ -49,7 +49,7 @@ Chart conversion (S-57 ENC, BSB raster, basemaps) is the only CPU-heavy thing th
 |---|---|---|
 | `single-core` | One job at a time on one worker thread | Multi-tenant Pi (Signal K + Grafana + Node-RED + …) where keeping the rest of the box responsive matters more than conversion speed |
 | `half` (default) | One job at a time on half the cores' worth of worker threads | Balanced — leaves half the box for everything else |
-| `all` | One full-throttle job with a worker thread per core; multi-bundle uploads queue serially | Dedicated chart-prep box, or when you just want a chart set to finish as fast as possible |
+| `all` | One full-throttle job with a worker thread per core; another conversion is refused (HTTP 429) until it finishes | Dedicated chart-prep box, or when you just want a chart set to finish as fast as possible |
 
 Conversion runs in worker threads, never on Signal K's event loop. The setting hot-applies — change it in the plugin config and Signal K will restart the plugin automatically; no server restart needed. In-flight conversions keep their workers; the next conversion picks up the new budget.
 

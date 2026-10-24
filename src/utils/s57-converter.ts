@@ -1,6 +1,7 @@
 import fs from 'fs';
 import https from 'https';
 import { DatabaseSync } from 'node:sqlite';
+import { pipeline } from 'node:stream/promises';
 import path from 'path';
 import unzipper from 'unzipper';
 import type {
@@ -843,6 +844,8 @@ function setRasterMetadata(file: string, rows: Record<string, string>): void {
   }
 }
 
+const DOWNLOAD_STALL_MS = 60_000;
+
 async function downloadFile(
   url: string,
   dest: string,
@@ -850,36 +853,34 @@ async function downloadFile(
 ): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const request = (target: string, redirects: number): void => {
-      https
-        .get(target, (response) => {
-          const status = response.statusCode ?? 0;
-          const location = response.headers.location;
-          if (status >= 300 && status < 400 && location && redirects < 5) {
-            response.resume();
-            request(new URL(location, target).toString(), redirects + 1);
-            return;
-          }
-          if (status !== 200) {
-            response.resume();
-            reject(new Error(`NOAA returned HTTP ${status}`));
-            return;
-          }
-          const total = parseInt(response.headers['content-length'] ?? '0');
-          let downloaded = 0;
-          response.on('data', (chunk: Buffer) => {
-            downloaded += chunk.length;
-            onProgress(downloaded, total);
-          });
-          const file = fs.createWriteStream(dest);
-          response.pipe(file);
-          file.on('finish', () => {
-            file.close(() => {
-              resolve();
-            });
-          });
-          file.on('error', reject);
-        })
-        .on('error', reject);
+      const req = https.get(target, (response) => {
+        const status = response.statusCode ?? 0;
+        const location = response.headers.location;
+        if (status >= 300 && status < 400 && location && redirects < 5) {
+          response.resume();
+          request(new URL(location, target).toString(), redirects + 1);
+          return;
+        }
+        if (status !== 200) {
+          response.resume();
+          reject(new Error(`NOAA returned HTTP ${status}`));
+          return;
+        }
+        const total = parseInt(response.headers['content-length'] ?? '0');
+        let downloaded = 0;
+        response.on('data', (chunk: Buffer) => {
+          downloaded += chunk.length;
+          onProgress(downloaded, total);
+        });
+        // pipeline settles on an error of either stream, so a dropped
+        // connection fails the download instead of leaving it pending.
+        pipeline(response, fs.createWriteStream(dest)).then(resolve, reject);
+      });
+      // A connection silent this long has stalled; fail it.
+      req.setTimeout(DOWNLOAD_STALL_MS, () => {
+        req.destroy(new Error('Download stalled'));
+      });
+      req.on('error', reject);
     };
     request(url, 0);
   });
@@ -945,7 +946,7 @@ export async function processGshhg(
   const outputName = `gshhg-basemap-${resolution}.mbtiles`;
   const outputPath = path.join(chartsDir, outputName);
 
-  await withWorkerPool(1, undefined, (pool) =>
+  await withWorkerPool(getCpuBudget().workersPerJob, undefined, (pool) =>
     rasterizeLandToMbtiles({
       shp: path.join(shpDir, 'GSHHS_shp', resolution, `GSHHS_${resolution}_L1.shp`),
       workDir: tmpDir,
@@ -1028,7 +1029,7 @@ export async function processShpBasemap(
     const outputName = `osm-basemap-${chartNumber.replace('basemap_', '')}.mbtiles`;
     const outputPath = path.join(chartsDir, outputName);
 
-    await withWorkerPool(1, undefined, (pool) =>
+    await withWorkerPool(getCpuBudget().workersPerJob, undefined, (pool) =>
       rasterizeLandToMbtiles({
         shp: landShp,
         workDir: tmpDir,

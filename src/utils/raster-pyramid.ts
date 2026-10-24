@@ -55,29 +55,38 @@ export async function addRasterOverviews(
       if (parents.length === 0) {
         break;
       }
-      await forEachConcurrent(parents, pool.size * 2, async ({ x, y }) => {
-        const rows = children.all(
-          z + 1,
-          x * 2,
-          x * 2 + 1,
-          y * 2,
-          y * 2 + 1
-        ) as unknown as TileRow[];
-        const { tile } = await pool.run({
-          op: 'raster-downsample',
-          // Rows count from the south (TMS), so the upper child — the
-          // northern one, quadrant row 0 — has the odd row.
-          children: rows.map((r) => ({
-            raw: r.tile_data,
-            dx: r.tile_column - x * 2,
-            dy: r.tile_row === y * 2 + 1 ? 0 : 1
-          }))
+      // One transaction per level: a commit per tile would cost a journal
+      // sync each, minutes on an SD card for a large basemap.
+      db.exec('BEGIN');
+      try {
+        await forEachConcurrent(parents, pool.size * 2, async ({ x, y }) => {
+          const rows = children.all(
+            z + 1,
+            x * 2,
+            x * 2 + 1,
+            y * 2,
+            y * 2 + 1
+          ) as unknown as TileRow[];
+          const { tile } = await pool.run({
+            op: 'raster-downsample',
+            // Rows count from the south (TMS), so the upper child — the
+            // northern one, quadrant row 0 — has the odd row.
+            children: rows.map((r) => ({
+              raw: r.tile_data,
+              dx: r.tile_column - x * 2,
+              dy: r.tile_row === y * 2 + 1 ? 0 : 1
+            }))
+          });
+          if (tile) {
+            insert.run(z, x, y, tile);
+            added++;
+          }
         });
-        if (tile) {
-          insert.run(z, x, y, tile);
-          added++;
-        }
-      });
+        db.exec('COMMIT');
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
       minzoom = z;
     }
     db.exec('BEGIN');

@@ -44,6 +44,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { Value } from 'typebox/value';
 import { NOAA_ENC_GEOJSON_URL, parseFootprints } from '../utils/noaa-enc-footprints.js';
+import { forEachLine } from '../utils/vector-tile-shard.js';
 import { PoolAbortedError, TaskFailedError, withWorkerPool } from '../utils/worker-pool.js';
 import { extractZipSafely } from '../utils/zip-extract.js';
 import {
@@ -409,8 +410,13 @@ async function runGdal(dir: string, cells: string[]): Promise<CellReport[]> {
   }, GDAL_TIMEOUT_MS);
   try {
     await withWorkerPool(1, timeout.signal, async (pool) => {
-      // The lines GDAL wrote for one read, or none when it failed.
-      const read = async (cell: string, args: string[]): Promise<string[]> => {
+      // Feed the lines GDAL wrote for one read to `onLine` as they are read
+      // back, never the whole output at once; a failed read feeds none.
+      const read = async (
+        cell: string,
+        args: string[],
+        onLine: (line: string) => void
+      ): Promise<void> => {
         try {
           await pool.run({
             op: 'gdal-vector-translate',
@@ -426,31 +432,30 @@ async function runGdal(dir: string, cells: string[]): Promise<CellReport[]> {
           // what it wrote before that still counts.
         }
         try {
-          return fs
-            .readFileSync(out, 'utf8')
-            .split('\n')
-            .filter((line) => line.trim() !== '');
-        } catch {
-          return [];
+          if (fs.existsSync(out)) {
+            forEachLine(out, (line) => {
+              if (line.trim() !== '') {
+                onLine(line);
+              }
+            });
+          }
         } finally {
           fs.rmSync(out, { force: true });
         }
       };
       for (const cell of cells) {
         parser.line(`${CELL_MARKER}${cell}`);
-        for (const line of await read(cell, DSID_ARGS)) {
-          parser.line(line);
-        }
-        const coverage = await read(cell, COVERAGE_ARGS);
+        await read(cell, DSID_ARGS, parser.line);
+        // Coverage is a few polygons; it is held to know whether there is any.
+        const coverage: string[] = [];
+        await read(cell, COVERAGE_ARGS, (line) => coverage.push(line));
         if (coverage.length > 0) {
           for (const line of coverage) {
             parser.line(line);
           }
         } else {
           parser.line(FEATURES_MARKER);
-          for (const line of await read(cell, FEATURES_ARGS)) {
-            parser.line(line);
-          }
+          await read(cell, FEATURES_ARGS, parser.line);
         }
       }
     });
