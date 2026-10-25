@@ -56,6 +56,10 @@ and band, each shown at that band's zooms within the user's range
 (`planTileSources`, `BAND_MIN_ZOOM` / `BAND_MAX_ZOOM` in `s57-band.ts`). The
 tiler builds the whole bundle in one pass, with no per-band runs to join.
 
+Two copies of a cell, such as a folder of cells beside the ZIP it came from,
+would write the same GeoJSON files, so only the first copy found is
+converted and the others are logged as skipped.
+
 ## The vector tiler
 
 The tiler takes GeoJSON files, each with an output layer and a zoom range, and
@@ -111,6 +115,26 @@ to a world GeoTIFF, tiled the same way, and given overview zooms of its own
 (`BASEMAP_OVERVIEW_LEVELS` in `s57-converter.ts`). Each overview tile is
 averaged, in the workers, from the tiles below it; a quarter with no tile
 below it stays transparent.
+
+## Charts already on the server
+
+The Convert tab can also convert charts already on the Signal K server's
+disk instead of an upload (`POST /convert-local`,
+`src/utils/local-chart-source.ts`). The user gives the full path of a folder
+or of one ZIP file; `~` is the server's home folder. A folder is searched
+recursively for S-57 cells (`.000`) or BSB charts (`.kap`, `.bsb`), loose or
+inside ZIP files, without following links or entering hidden folders. A ZIP is
+looked into without extracting it and used only if it holds a chart file; one
+that cannot be read is skipped and reported. A path that holds
+more than `MAX_SCAN_ENTRIES` entries, such as a disk's root, is refused once
+the search reaches that many, instead of being searched in full.
+
+The source is only read. Loose charts are converted where they lie, and ZIP
+files are extracted into a `convert-local-<time>` folder in the plugin's data
+directory, removed when the conversion ends. The S-57 cells of the whole
+folder become one MBTiles, named after the folder or ZIP; BSB charts become one
+MBTiles each, as with an upload. When Signal K runs in Docker, the path is
+inside the container, so the folder must be mounted into it.
 
 ## Caches and versions
 

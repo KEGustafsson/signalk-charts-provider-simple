@@ -741,6 +741,38 @@ option.catalog-folder-option-new {
     margin-bottom: var(--md-sys-spacing-4);
 }
 
+.convert-local {
+    margin-top: var(--md-sys-spacing-4);
+}
+
+.convert-local label {
+    display: block;
+    color: var(--md-sys-color-on-surface);
+    font-size: 14px;
+    margin-bottom: var(--md-sys-spacing-2);
+}
+
+.convert-local-row {
+    display: flex;
+    align-items: center;
+    gap: var(--md-sys-spacing-2);
+}
+
+.convert-local-row .btn {
+    flex: none;
+}
+
+.convert-local-row .input-field {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.convert-local-hint {
+    color: var(--md-sys-color-on-surface-variant);
+    font-size: 12px;
+    margin-top: var(--md-sys-spacing-1);
+}
+
 .convert-upload-options {
     display: inline-flex;
     align-items: center;

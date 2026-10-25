@@ -17,6 +17,7 @@ import { sanitizeChartFilename } from './catalog-title.js';
 import { getCpuBudget } from './concurrency.js';
 import { MAX_CONVERSION_LOG_LINES } from './conversion-log.js';
 import { setConversionResult } from './conversion-progress.js';
+import { extractLocalChartSource, isS57Cell, type LocalChartSource } from './local-chart-source.js';
 import { patchS57Mbtiles, setMbtilesDisplayName } from './mbtiles-metadata.js';
 import { addRasterOverviews } from './raster-pyramid.js';
 import { BAND_MAX_ZOOM, BAND_MIN_ZOOM, detectEncBand, exportFileParts } from './s57-band.js';
@@ -109,6 +110,27 @@ function findEncFiles(dir: string): string[] {
   };
   scan(dir);
   return files;
+}
+
+/**
+ * Keep one cell of each name. GDAL writes a cell's layers to files named
+ * after the cell, so two copies of a cell (a folder beside its own ZIP, say)
+ * would write the same files; the first copy found is kept.
+ */
+function uniqueCells(cells: readonly string[]): { kept: string[]; duplicates: string[] } {
+  const seen = new Set<string>();
+  const kept: string[] = [];
+  const duplicates: string[] = [];
+  for (const cell of cells) {
+    const name = path.basename(cell).toUpperCase();
+    if (seen.has(name)) {
+      duplicates.push(cell);
+    } else {
+      seen.add(name);
+      kept.push(cell);
+    }
+  }
+  return { kept, duplicates };
 }
 
 function appendLog(chartNumber: string, text: string): void {
@@ -418,6 +440,7 @@ export function planTileSources(
 
 export const _testInternals = {
   surfaceExportErrorsIfEmpty,
+  uniqueCells,
   wantedMbtilesName,
   SKIP_LAYERS
 };
@@ -506,12 +529,15 @@ export async function processS57Directory(
   };
 
   try {
-    const encFiles = findEncFiles(encDir);
+    const { kept: encFiles, duplicates } = uniqueCells(options.cells ?? findEncFiles(encDir));
     if (encFiles.length === 0) {
       throw new Error('No S-57 ENC files (.000) found in the chart data');
     }
     debug(`Found ${encFiles.length} ENC files`);
     appendLog(chartNumber, `Found ${encFiles.length} ENC files`);
+    for (const cell of duplicates) {
+      appendLog(chartNumber, `Skipping ${cell}: a cell of the same name is already included`);
+    }
 
     const userMinzoom = options.minzoom ?? 9;
     const userMaxzoom = options.maxzoom ?? 16;
@@ -743,6 +769,48 @@ export async function processS57Zip(
       debug(`Warning: failed to clean up ${tmpDir}`);
     }
   }
+}
+
+/**
+ * Convert the S-57 cells of a folder or ZIP on the server's disk (see
+ * local-chart-source.ts) to one vector MBTiles. Its archives are extracted
+ * under `workDir`, which the caller removes; the source is only read.
+ */
+export async function processS57Local(
+  source: LocalChartSource,
+  workDir: string,
+  chartsDir: string,
+  chartNumber: string,
+  onStatus: StatusCallback | null,
+  options: S57ConversionOptions = {}
+): Promise<S57ConversionResult> {
+  conversionProgress[chartNumber] = {
+    status: 'extracting',
+    message: 'Reading the chart folder...',
+    log: []
+  };
+  let cells: string[];
+  try {
+    cells = await extractLocalChartSource(source, isS57Cell, workDir, (zip, index, count) => {
+      const message = `Extracting ${path.basename(zip)} (${String(index)}/${String(count)})...`;
+      onStatus?.('extracting', message);
+      setProgress(chartNumber, 'extracting', message);
+    });
+  } catch (err) {
+    setConversionFailed(
+      chartNumber,
+      `Extracting the ZIP files failed: ${err instanceof Error ? err.message : String(err)}`
+    );
+    throw err;
+  }
+  return processS57Directory(
+    source.root,
+    chartsDir,
+    chartNumber,
+    onStatus,
+    { ...options, cells },
+    workDir
+  );
 }
 
 const GSHHG_URL = 'https://www.ngdc.noaa.gov/mgg/shorelines/data/gshhg/latest/gshhg-shp-2.3.7.zip';

@@ -372,6 +372,22 @@ export function startMockServer(
     res.json(cat);
   });
 
+  // Converting charts already on the server: a path ending in /missing is
+  // refused as the real route refuses a path that does not exist.
+  router.post(`${PLUGIN_BASE}/convert-local`, (req, res) => {
+    const body = req.body as { type: string; path: string };
+    if (body.path.endsWith('/missing')) {
+      res.status(400).json({
+        success: false,
+        error: `${body.path} does not exist on the Signal K server`
+      });
+      return;
+    }
+    const chartNumber = path.basename(body.path);
+    state.conversions[chartNumber] = { status: 'converting', message: 'Exporting...', log: [] };
+    res.json({ success: true, chartNumber, looseFiles: 2, zips: 1, unreadableZips: 0 });
+  });
+
   router.get(`${PLUGIN_BASE}/catalog-s57-status`, (_req, res) => {
     res.json({
       conversionAvailable: true,

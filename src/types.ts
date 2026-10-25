@@ -362,6 +362,12 @@ export interface S57ConversionOptions {
    * from GDAL output it kept from earlier runs.
    */
   geojsonFor?: (encFiles: readonly string[], outDir: string) => Promise<void>;
+  /**
+   * Optional cells (`.000` files) to convert, in place of those found under
+   * the directory given. Converting charts from a folder on the server
+   * passes the cells it found there and in its archives.
+   */
+  cells?: readonly string[];
 }
 
 export interface RncConversionResult {
