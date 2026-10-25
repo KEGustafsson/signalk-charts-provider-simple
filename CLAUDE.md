@@ -63,7 +63,7 @@ The Chart Catalog is backed by one merged catalog file that this repo publishes 
 
 ### Hot-apply config and the path marker
 
-`start()` is called fresh on every config save (Signal K restarts the plugin, not the whole server). `utils/path-marker.ts` writes `.charts-provider-marker.json` into the chart path on each start, recording plugin version, container hints, and effective UID — useful when diagnosing host-vs-container path mismatches.
+`start()` is called fresh on every config save (Signal K restarts the plugin, not the whole server). `stop()` bumps `lifecycle` and sets `stopped`; work a start began in the background (a chart rescan, the startup housekeeping) checks them after each await and closes the charts it opened instead of installing them, because on Windows an open `.mbtiles` stays locked against deleting or replacing it. The startup sweep of the chart folder (invalid `.mbtiles`, orphaned journal and WAL files) starts `SWEEP_DELAY_MS` after the charts load, is cancelled by `stop()`, and lists the folder before validating it, so a chart an upload or conversion places meanwhile is never deleted. `utils/path-marker.ts` writes `.charts-provider-marker.json` into the chart path on each start, recording plugin version, container hints, and effective UID — useful when diagnosing host-vs-container path mismatches.
 
 ### Web UI
 
