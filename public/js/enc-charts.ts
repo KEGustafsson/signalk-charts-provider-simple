@@ -96,6 +96,7 @@ type CatalogPhase =
   | 'preparing'
   | 'downloading'
   | 'converting'
+  | 'joining'
   | 'completed'
   | 'cancelling'
   | 'cancelled'
@@ -1229,6 +1230,8 @@ function phaseText(phase: CatalogPhase | undefined): string {
       return 'Downloading charts';
     case 'converting':
       return 'Converting';
+    case 'joining':
+      return 'Joining tiles';
     case 'completed':
       return 'Completed';
     case 'cancelling':
@@ -1270,8 +1273,8 @@ function renderProgress(): void {
   if (ccBusy && d?.phase === 'cancelling') {
     cancelHtml = `<span class="cc-cancel-pending">Cancelling…</span>`;
   } else if (ccBusy) {
-    // Every phase is cancellable: the cancel route aborts the in-flight
-    // download or conversion.
+    // Every phase — including the combine — is cancellable: the cancel
+    // route aborts the in-flight download, container job or conversion.
     cancelHtml = `<button class="cc-btn cc-btn-danger cc-cancel-btn" data-cc-action="cancel">Cancel</button>`;
   }
 

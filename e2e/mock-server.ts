@@ -391,7 +391,13 @@ export function startMockServer(
   router.get(`${PLUGIN_BASE}/catalog-s57-status`, (_req, res) => {
     res.json({
       conversionAvailable: true,
-      converter: 'gdal3.js 2.8.1',
+      conversionEngine: 'wasm',
+      conversionEnginePreference: 'auto',
+      converter: 'built-in GDAL (WebAssembly, gdal3.js 2.8.1)',
+      wasmConverter: 'gdal3.js 2.8.1',
+      containerRuntimeAvailable: false,
+      containerRuntimeVersion: null,
+      podmanAvailable: true,
       conversions: state.conversions
     });
   });

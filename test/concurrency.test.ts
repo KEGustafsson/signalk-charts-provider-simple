@@ -10,7 +10,9 @@ describe('cpu budget presets', () => {
         const b = _computeBudgetForTests('single-core', cpus);
         assert.deepStrictEqual(b, {
           maxConcurrentConversions: 1,
-          workersPerJob: 1
+          workersPerJob: 1,
+          tippecanoeThreadsPerJob: 1,
+          gdalExportParallelism: 1
         });
       }
     });
@@ -18,11 +20,15 @@ describe('cpu budget presets', () => {
     it('all uses every core in one job', () => {
       assert.deepStrictEqual(_computeBudgetForTests('all', 4), {
         maxConcurrentConversions: 1,
-        workersPerJob: 4
+        workersPerJob: 4,
+        tippecanoeThreadsPerJob: 4,
+        gdalExportParallelism: 4
       });
       assert.deepStrictEqual(_computeBudgetForTests('all', 8), {
         maxConcurrentConversions: 1,
-        workersPerJob: 8
+        workersPerJob: 8,
+        tippecanoeThreadsPerJob: 8,
+        gdalExportParallelism: 8
       });
     });
 
@@ -34,31 +40,41 @@ describe('cpu budget presets', () => {
       // 4 cpus → 1 job × 2 threads
       assert.deepStrictEqual(_computeBudgetForTests('half', 4), {
         maxConcurrentConversions: 1,
-        workersPerJob: 2
+        workersPerJob: 2,
+        tippecanoeThreadsPerJob: 2,
+        gdalExportParallelism: 2
       });
       // 6 cpus → 1 job × 3 threads
       assert.deepStrictEqual(_computeBudgetForTests('half', 6), {
         maxConcurrentConversions: 1,
-        workersPerJob: 3
+        workersPerJob: 3,
+        tippecanoeThreadsPerJob: 3,
+        gdalExportParallelism: 3
       });
       // 8 cpus → 1 job × 4 threads
       assert.deepStrictEqual(_computeBudgetForTests('half', 8), {
         maxConcurrentConversions: 1,
-        workersPerJob: 4
+        workersPerJob: 4,
+        tippecanoeThreadsPerJob: 4,
+        gdalExportParallelism: 4
       });
     });
 
     it('half on a 1-core box collapses cleanly to 1 × 1', () => {
       assert.deepStrictEqual(_computeBudgetForTests('half', 1), {
         maxConcurrentConversions: 1,
-        workersPerJob: 1
+        workersPerJob: 1,
+        tippecanoeThreadsPerJob: 1,
+        gdalExportParallelism: 1
       });
     });
 
     it('half on a 2-core box gives 1 job × 1 thread (half of 2 = 1)', () => {
       assert.deepStrictEqual(_computeBudgetForTests('half', 2), {
         maxConcurrentConversions: 1,
-        workersPerJob: 1
+        workersPerJob: 1,
+        tippecanoeThreadsPerJob: 1,
+        gdalExportParallelism: 1
       });
     });
   });
@@ -71,13 +87,17 @@ describe('cpu budget presets', () => {
       const b = getCpuBudget();
       assert.ok(b.maxConcurrentConversions >= 1);
       assert.ok(b.workersPerJob >= 1);
+      assert.ok(b.tippecanoeThreadsPerJob >= 1);
+      assert.ok(b.gdalExportParallelism >= 1);
     });
 
     it('switches to single-core when set', () => {
       setCpuBudget('single-core');
       assert.deepStrictEqual(getCpuBudget(), {
         maxConcurrentConversions: 1,
-        workersPerJob: 1
+        workersPerJob: 1,
+        tippecanoeThreadsPerJob: 1,
+        gdalExportParallelism: 1
       });
     });
 
@@ -86,6 +106,8 @@ describe('cpu budget presets', () => {
       const b = getCpuBudget();
       assert.strictEqual(b.maxConcurrentConversions, 1);
       assert.ok(b.workersPerJob >= 1);
+      assert.ok(b.tippecanoeThreadsPerJob >= 1);
+      assert.ok(b.gdalExportParallelism >= 1);
     });
 
     it('falls back to half on undefined', () => {

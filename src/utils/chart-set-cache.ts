@@ -23,7 +23,7 @@ import type { EncDownloadResult } from './custom-catalog-download.js';
 import type { PlannedCell } from './enc-chart-set.js';
 import { isWithinBase } from './path-safety.js';
 import { exportFileParts } from './s57-band.js';
-import { COMPLETE_MARKER_PREFIX, EXPORT_ERROR_FILE_BASENAME } from './s57-converter.js';
+import { COMPLETE_MARKER_PREFIX, EXPORT_ERROR_FILE_BASENAME } from './s57-export-files.js';
 
 /**
  * Bump when the GDAL export changes what it writes for the same cell, so

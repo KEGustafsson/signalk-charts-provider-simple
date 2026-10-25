@@ -1,8 +1,9 @@
 /**
- * Chart conversion runs in-process (GDAL compiled to WebAssembly), so the
- * plugin never depends on a container runtime: startup raises no error even
- * when catalog-installed charts will need converting, and the status route
- * reports conversion as available.
+ * Chart conversion never depends on a container runtime: without
+ * signalk-container it runs in-process (GDAL compiled to WebAssembly), so
+ * startup raises no error even when catalog-installed charts will need
+ * converting, and the status route reports conversion as available. With a
+ * runtime, the status route reports the container toolchain.
  */
 
 import { describe, it, afterEach } from 'node:test';
@@ -16,6 +17,14 @@ import type { Plugin } from '@signalk/server-api';
 import type { ExtendedServerAPI } from '../dist/types.js';
 import pluginFactoryDefault from '../dist/index.js';
 import { downloadManager } from '../dist/utils/download-manager.js';
+import {
+  _resetContainerManagerForTests,
+  type ContainerManagerApi
+} from '../dist/utils/container-manager.js';
+
+declare global {
+  var __signalk_containerManager: ContainerManagerApi | undefined;
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pluginFactory = pluginFactoryDefault as unknown as (app: ExtendedServerAPI) => Plugin;
@@ -141,6 +150,8 @@ describe('Conversion availability', () => {
       fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
     downloadManager.removeAllListeners();
+    _resetContainerManagerForTests();
+    delete globalThis.__signalk_containerManager;
   });
 
   it('starts without a plugin error when installed catalog charts need conversion', async () => {
@@ -168,8 +179,62 @@ describe('Conversion availability', () => {
     assert.ok(status, 'status route should be registered');
     const res = makeRes();
     await status({}, res);
-    const body = res.body as { conversionAvailable?: boolean; converter?: string };
+    const body = res.body as {
+      conversionAvailable?: boolean;
+      conversionEngine?: string;
+      wasmConverter?: string;
+      containerRuntimeAvailable?: boolean;
+      podmanAvailable?: boolean;
+    };
     assert.strictEqual(body.conversionAvailable, true);
-    assert.match(String(body.converter), /^gdal3\.js/);
+    assert.strictEqual(body.conversionEngine, 'wasm');
+    assert.match(String(body.wasmConverter), /^gdal3\.js/);
+    assert.strictEqual(body.containerRuntimeAvailable, false);
+    // Older UIs disabled conversion on this; conversion is available.
+    assert.strictEqual(body.podmanAvailable, true);
+  });
+
+  it('reports the container toolchain once signalk-container has a runtime', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'conversion-status-'));
+    tempDirs.push(tempDir);
+    const chartPath = path.join(tempDir, 'charts');
+    fs.mkdirSync(chartPath, { recursive: true });
+    let reaps = 0;
+    globalThis.__signalk_containerManager = {
+      getRuntime: () => ({ runtime: 'podman', version: '5.0.0' }),
+      imageExists: () => Promise.resolve(true),
+      pullImage: () => Promise.resolve(),
+      runJob: () => Promise.resolve({ status: 'completed', exitCode: 0, log: [] }),
+      resolveSignalkDataMount: () => Promise.resolve(null),
+      resolveHostPath: (p: string) => Promise.resolve({ source: p, subPath: '' }),
+      cleanupOrphanedJobs: () => {
+        reaps++;
+        return Promise.resolve({ reaped: [] });
+      }
+    };
+    const recording = createRecordingApp(tempDir);
+    const plugin = pluginFactory(recording.app);
+    plugins.push(plugin);
+    const { router, handlers } = createRouterStub();
+    plugin.registerWithRouter?.(router);
+    plugin.start({ chartPath }, () => {});
+    await waitFor(() => recording.statuses.includes('Started'), 'startup');
+
+    const status = handlers.get('get /catalog-s57-status');
+    assert.ok(status, 'status route should be registered');
+    await waitFor(() => {
+      const res = makeRes();
+      void status({}, res);
+      return (res.body as { conversionEngine?: string }).conversionEngine === 'container';
+    }, 'container discovery');
+    const res = makeRes();
+    await status({}, res);
+    const body = res.body as { containerRuntimeVersion?: string; conversionAvailable?: boolean };
+    assert.strictEqual(body.containerRuntimeVersion, 'podman version 5.0.0');
+    assert.strictEqual(body.conversionAvailable, true);
+    assert.deepStrictEqual(recording.errors, []);
+    // Orphans are reaped at most once per process; an earlier test file may
+    // have used the one reap already.
+    assert.ok(reaps <= 1);
   });
 });

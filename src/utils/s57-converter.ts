@@ -15,12 +15,32 @@ import type {
 } from '../types.js';
 import { sanitizeChartFilename } from './catalog-title.js';
 import { getCpuBudget } from './concurrency.js';
+import {
+  CONVERSION_ABORTED_MESSAGE,
+  chooseConversionBackend,
+  describeBackend,
+  fallbackNote,
+  type ConversionBackend,
+  type ConversionReport
+} from './conversion-backend.js';
 import { MAX_CONVERSION_LOG_LINES } from './conversion-log.js';
 import { setConversionResult } from './conversion-progress.js';
 import { extractLocalChartSource, isS57Cell, type LocalChartSource } from './local-chart-source.js';
 import { patchS57Mbtiles, setMbtilesDisplayName } from './mbtiles-metadata.js';
 import { addRasterOverviews } from './raster-pyramid.js';
 import { BAND_MAX_ZOOM, BAND_MIN_ZOOM, detectEncBand, exportFileParts } from './s57-band.js';
+import {
+  exportCellsInContainer,
+  rasterizeLandInContainer,
+  tileS57InContainer
+} from './s57-container.js';
+import {
+  COMPLETE_MARKER_PREFIX,
+  EXPORT_ERROR_FILE_BASENAME,
+  SKIP_LAYERS,
+  exportErrorReport,
+  geojsonContentSize
+} from './s57-export-files.js';
 import { extractTarArchive } from './tar-extract.js';
 import { buildVectorMbtiles, type TileSource } from './vector-tiler.js';
 import {
@@ -31,11 +51,7 @@ import {
   type WorkerPool
 } from './worker-pool.js';
 
-// Message thrown when an in-progress conversion is cancelled — at a stage
-// boundary (isAborted) or mid-stage, when the abort signal terminates the
-// conversion's worker threads. Callers (the Custom Catalogs flow) detect
-// cancellation via their own flag, so this is just a recognizable stop signal.
-export const CONVERSION_ABORTED_MESSAGE = 'Conversion cancelled';
+export { CONVERSION_ABORTED_MESSAGE, COMPLETE_MARKER_PREFIX, EXPORT_ERROR_FILE_BASENAME };
 
 // A cancelled pool rejects its tasks with PoolAbortedError; surface that as
 // the one cancellation message callers know.
@@ -160,6 +176,60 @@ function setProgress(chartNumber: string, status: string, message: string): void
   }
 }
 
+/** The sinks a toolchain reports `chartNumber`'s conversion through. */
+function reporter(chartNumber: string): ConversionReport {
+  return {
+    log: (text) => {
+      appendLog(chartNumber, text);
+    },
+    progress: (status, message) => {
+      setProgress(chartNumber, status, message);
+    },
+    message: (text) => {
+      if (chartNumber && conversionProgress[chartNumber]) {
+        conversionProgress[chartNumber].message = text;
+      }
+    },
+    debug: (msg) => {
+      debug(msg);
+    }
+  };
+}
+
+/**
+ * The toolchain for one conversion: `preset` when the caller chose already
+ * (a chart set picks one for its whole run), otherwise the container one
+ * when it can mount `mountPaths`, else the WebAssembly fallback. The choice
+ * and any fallback reason go to the conversion log.
+ */
+async function pickBackend(
+  chartNumber: string,
+  preset: ConversionBackend | undefined,
+  mountPaths: readonly string[],
+  statusFn: StatusCallback
+): Promise<ConversionBackend> {
+  if (preset) {
+    return preset;
+  }
+  const choice = await chooseConversionBackend({
+    mountPaths,
+    debug: (msg) => {
+      debug(msg);
+    },
+    onCheckingImage: () => {
+      statusFn('pulling', 'Checking container image...');
+      setProgress(chartNumber, 'pulling', 'Checking charts-toolbox image...');
+    }
+  });
+  const note = fallbackNote(choice);
+  if (note) {
+    debug(note);
+    appendLog(chartNumber, note);
+  }
+  appendLog(chartNumber, `Conversion engine: ${describeBackend(choice.backend)}`);
+  return choice.backend;
+}
+
 /**
  * The `name` metadata row the tiler writes into the output MBTiles, so the
  * file is born with a sensible name even when the post-conversion metadata
@@ -233,23 +303,6 @@ export function chooseOutputFilename(opts: {
 }
 
 /**
- * Prefix of the empty file the export writes for each cell it exported
- * without an error, when asked to (`perCell`).
- */
-export const COMPLETE_MARKER_PREFIX = '.complete-';
-
-// Per-cell GDAL errors are collected here, beside the GeoJSON. Without it, a
-// "the export ran but produced nothing" outcome is indistinguishable from
-// "every chart failed for the same reason". Surfaced into the user-visible
-// conversion log when no usable output lands.
-export const EXPORT_ERROR_FILE_BASENAME = '.export-errors.log';
-const EXPORT_ERROR_SAMPLE_LINES = 10;
-
-// S-57 records that are not chart features: the dataset header, the
-// aggregation/association collections, and GDAL's catch-all layer.
-const SKIP_LAYERS = ['DSID', 'C_AGGR', 'C_ASSO', 'Generic'];
-
-/**
  * Export every layer of every cell to `<LAYER>__<cell>.geojson` in
  * `geojsonDir` (`<LAYER>.geojson` for a lone cell, unless `perCell`), one
  * cell per worker at a time. One unreadable layer or cell is logged, not
@@ -310,79 +363,11 @@ async function exportAllLayersToGeoJSON(
 }
 
 function surfaceExportErrorsIfEmpty(geojsonDir: string, chartNumber: string): void {
-  let hasUsableOutput = false;
-  try {
-    for (const f of fs.readdirSync(geojsonDir)) {
-      if (!f.endsWith('.geojson')) {
-        continue;
-      }
-      if (fs.statSync(path.join(geojsonDir, f)).size > 100) {
-        hasUsableOutput = true;
-        break;
-      }
-    }
-  } catch {
-    return;
-  }
-  if (hasUsableOutput) {
-    return;
-  }
-
-  const errorFile = path.join(geojsonDir, EXPORT_ERROR_FILE_BASENAME);
-  let raw: string;
-  try {
-    raw = fs.readFileSync(errorFile, 'utf8');
-  } catch {
-    appendLog(
-      chartNumber,
-      'GDAL export produced no usable layers and no per-file errors were captured. ' +
-        'Check that the chart files are readable by the Signal K server.'
-    );
-    return;
-  }
-  const lines = raw.split(/\r?\n/).filter((l) => l.trim().length > 0);
-  if (lines.length === 0) {
-    appendLog(
-      chartNumber,
-      'GDAL export produced no usable layers and the captured error log was empty.'
-    );
-    return;
-  }
-  appendLog(
-    chartNumber,
-    `GDAL export ran but produced no usable GeoJSON layers. First ${Math.min(EXPORT_ERROR_SAMPLE_LINES, lines.length)} of ${lines.length} captured GDAL error line(s):`
-  );
-  for (const line of lines.slice(0, EXPORT_ERROR_SAMPLE_LINES)) {
-    appendLog(chartNumber, `  ${line}`);
-  }
-  if (lines.length > EXPORT_ERROR_SAMPLE_LINES) {
-    appendLog(
-      chartNumber,
-      `  ... ${lines.length - EXPORT_ERROR_SAMPLE_LINES} more error line(s) suppressed.`
-    );
-  }
-}
-
-/**
- * Size of a GeoJSON export file's content: an empty FeatureCollection is
- * ~100 bytes. A gzip file records its uncompressed size (modulo 2^32) in its
- * last four bytes, which is enough to tell.
- */
-function geojsonContentSize(file: string): number {
-  if (!file.endsWith('.gz')) {
-    return fs.statSync(file).size;
-  }
-  const handle = fs.openSync(file, 'r');
-  try {
-    const size = fs.fstatSync(handle).size;
-    if (size < 4) {
-      return 0;
-    }
-    const tail = Buffer.alloc(4);
-    fs.readSync(handle, tail, 0, 4, size - 4);
-    return tail.readUInt32LE(0);
-  } finally {
-    fs.closeSync(handle);
+  for (const line of exportErrorReport(
+    geojsonDir,
+    'Check that the chart files are readable by the Signal K server.'
+  )) {
+    appendLog(chartNumber, line);
   }
 }
 
@@ -450,12 +435,15 @@ export const _testInternals = {
  * per layer and cell into `geojsonDir`, without making tiles. The chart-set
  * cache keeps this output per cell, so an update runs GDAL only on the cells
  * that changed. Progress and errors go to `chartNumber`'s conversion log.
+ * `backend` is the toolchain the chart set's run chose, whose GDAL build keys
+ * the cache; without it one is chosen here.
  */
 export async function exportS57CellsToGeoJSON(
   encDir: string,
   geojsonDir: string,
   chartNumber: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  backend?: ConversionBackend
 ): Promise<void> {
   const encFiles = findEncFiles(encDir);
   if (encFiles.length === 0) {
@@ -464,7 +452,16 @@ export async function exportS57CellsToGeoJSON(
   fs.mkdirSync(geojsonDir, { recursive: true });
   // A fresh log, so it holds only what this export reports.
   conversionProgress[chartNumber] = { status: 'converting', message: '', log: [] };
+  const chosen = await pickBackend(chartNumber, backend, [encDir, geojsonDir], () => {});
   appendLog(chartNumber, `Exporting ${encFiles.length} changed cell(s) to GeoJSON...`);
+  if (chosen === 'container') {
+    await exportCellsInContainer(encDir, geojsonDir, chartNumber, reporter(chartNumber), {
+      multiFile: true,
+      perCell: true,
+      signal
+    });
+    return;
+  }
   try {
     await withWorkerPool(getCpuBudget().workersPerJob, signal, (pool) =>
       exportAllLayersToGeoJSON(encFiles, geojsonDir, chartNumber, pool, undefined, true)
@@ -482,9 +479,12 @@ export async function exportS57CellsToGeoJSON(
  * into one combined tree and converts it in a single pass so the output is
  * one `.mbtiles` per chart set.
  *
- * Two stages, both on the conversion's worker threads: GDAL (WebAssembly)
- * exports each cell's layers to GeoJSON, then the vector tiler builds the
- * MBTiles with each IHO band at its own zooms (see planTileSources).
+ * Two stages: GDAL exports each cell's layers to GeoJSON, then the tiles are
+ * built with each IHO band at its own zooms. The container toolchain runs
+ * GDAL and tippecanoe in the charts-toolbox image (s57-container.ts); its
+ * WebAssembly fallback runs GDAL and the vector tiler on the conversion's
+ * worker threads (see planTileSources). `options.backend` pins the
+ * toolchain; otherwise conversion-backend.ts picks one.
  *
  * `encDir` is treated as read-only input. All conversion scratch is created
  * under `scratchParent` (defaulting to the parent of `encDir`) and removed on
@@ -511,17 +511,8 @@ export async function processS57Directory(
     };
   }
 
-  const emit = (stage: S57BucketProgress['stage'], bucketPercent: number): void => {
-    options.onProgress?.({
-      stage,
-      bucketIndex: 1,
-      bucketCount: 1,
-      bucketLabel: 'Charts',
-      bucketPercent
-    });
-  };
   // Cooperative cancel between stages; the abort signal stops a stage
-  // mid-way by terminating its workers.
+  // mid-way by killing its container job or terminating its workers.
   const abortIfRequested = (): void => {
     if (options.isAborted?.() || options.signal?.aborted) {
       throw new Error(CONVERSION_ABORTED_MESSAGE);
@@ -539,66 +530,37 @@ export async function processS57Directory(
       appendLog(chartNumber, `Skipping ${cell}: a cell of the same name is already included`);
     }
 
-    const userMinzoom = options.minzoom ?? 9;
-    const userMaxzoom = options.maxzoom ?? 16;
     const outputName = chooseOutputFilename({
       chartsDir,
       displayName: options.displayName,
       chartNumber
     });
     const outputPath = path.join(chartsDir, outputName);
-    const workers = getCpuBudget().workersPerJob;
+    const backend = await pickBackend(chartNumber, options.backend, [tmpDir, chartsDir], statusFn);
+    abortIfRequested();
 
-    await withWorkerPool(workers, options.signal, async (pool) => {
-      statusFn('converting', 'Converting S-57 layers to GeoJSON...');
-      emit('export', options.geojsonFor ? -1 : 0);
-      if (options.geojsonFor) {
-        appendLog(chartNumber, `Using the kept GeoJSON of ${encFiles.length} cell(s)`);
-        await options.geojsonFor(encFiles, geojsonDir);
-      } else {
-        setProgress(chartNumber, 'converting', `Exporting ${encFiles.length} ENC files...`);
-        appendLog(
-          chartNumber,
-          `Exporting ${encFiles.length} ENC file(s) with GDAL (WebAssembly), ${workers} worker(s)`
-        );
-        await exportAllLayersToGeoJSON(encFiles, geojsonDir, chartNumber, pool, (pct) => {
-          emit('export', pct);
-        });
-      }
-      abortIfRequested();
-
-      const sources = planTileSources(geojsonDir, userMinzoom, userMaxzoom);
-      if (sources.length === 0) {
-        throw new Error('No valid GeoJSON layers to process');
-      }
-      logBandPlan(chartNumber, sources, userMinzoom, userMaxzoom);
-
-      statusFn('converting', 'Generating vector tiles...');
-      setProgress(chartNumber, 'converting', 'Generating vector tiles...');
-      emit('tiles', 0);
-      const result = await buildVectorMbtiles({
-        sources,
-        output: outputPath,
-        scratchDir: path.join(tmpDir, 'tiles'),
-        pool,
-        name: wantedMbtilesName(chartNumber, options.displayName),
-        description: options.displayDescription,
-        signal: options.signal,
-        log: (msg) => {
-          appendLog(chartNumber, msg);
-        },
-        onPercent: (pct) => {
-          if (chartNumber && conversionProgress[chartNumber]) {
-            conversionProgress[chartNumber].message = `Generating tiles: ${pct}%`;
-          }
-          emit('tiles', pct);
-        }
+    if (backend === 'container') {
+      await tileS57InContainer({
+        encFiles,
+        tmpDir,
+        outputPath,
+        label: chartNumber || 'enc',
+        mbtilesName: wantedMbtilesName(chartNumber, options.displayName),
+        options,
+        report: reporter(chartNumber),
+        statusFn
       });
-      appendLog(
+    } else {
+      await tileS57WithWasm(
+        encFiles,
+        tmpDir,
+        geojsonDir,
+        outputPath,
         chartNumber,
-        `Wrote ${result.tiles} tiles (z${result.minzoom}-z${result.maxzoom}) from ${result.features} features`
+        options,
+        statusFn
       );
-    });
+    }
 
     if (!fs.existsSync(outputPath)) {
       throw new Error('Tiling completed but output file not found');
@@ -671,6 +633,86 @@ export async function processS57Directory(
       debug(`Warning: failed to clean up ${tmpDir}`);
     }
   }
+}
+
+/**
+ * Tile S-57 cells into `outputPath` with the WebAssembly toolchain: GDAL
+ * exports each cell on the conversion's worker threads, then the vector
+ * tiler builds every band in one pass.
+ */
+async function tileS57WithWasm(
+  encFiles: readonly string[],
+  tmpDir: string,
+  geojsonDir: string,
+  outputPath: string,
+  chartNumber: string,
+  options: S57ConversionOptions,
+  statusFn: StatusCallback
+): Promise<void> {
+  const userMinzoom = options.minzoom ?? 9;
+  const userMaxzoom = options.maxzoom ?? 16;
+  const workers = getCpuBudget().workersPerJob;
+  const emit = (stage: S57BucketProgress['stage'], bucketPercent: number): void => {
+    options.onProgress?.({
+      stage,
+      bucketIndex: 1,
+      bucketCount: 1,
+      bucketLabel: 'Charts',
+      bucketPercent
+    });
+  };
+  await withWorkerPool(workers, options.signal, async (pool) => {
+    statusFn('converting', 'Converting S-57 layers to GeoJSON...');
+    emit('export', options.geojsonFor ? -1 : 0);
+    if (options.geojsonFor) {
+      appendLog(chartNumber, `Using the kept GeoJSON of ${encFiles.length} cell(s)`);
+      await options.geojsonFor(encFiles, geojsonDir);
+    } else {
+      setProgress(chartNumber, 'converting', `Exporting ${encFiles.length} ENC files...`);
+      appendLog(
+        chartNumber,
+        `Exporting ${encFiles.length} ENC file(s) with GDAL (WebAssembly), ${workers} worker(s)`
+      );
+      await exportAllLayersToGeoJSON(encFiles, geojsonDir, chartNumber, pool, (pct) => {
+        emit('export', pct);
+      });
+    }
+    if (options.isAborted?.() || options.signal?.aborted) {
+      throw new Error(CONVERSION_ABORTED_MESSAGE);
+    }
+
+    const sources = planTileSources(geojsonDir, userMinzoom, userMaxzoom);
+    if (sources.length === 0) {
+      throw new Error('No valid GeoJSON layers to process');
+    }
+    logBandPlan(chartNumber, sources, userMinzoom, userMaxzoom);
+
+    statusFn('converting', 'Generating vector tiles...');
+    setProgress(chartNumber, 'converting', 'Generating vector tiles...');
+    emit('tiles', 0);
+    const result = await buildVectorMbtiles({
+      sources,
+      output: outputPath,
+      scratchDir: path.join(tmpDir, 'tiles'),
+      pool,
+      name: wantedMbtilesName(chartNumber, options.displayName),
+      description: options.displayDescription,
+      signal: options.signal,
+      log: (msg) => {
+        appendLog(chartNumber, msg);
+      },
+      onPercent: (pct) => {
+        if (chartNumber && conversionProgress[chartNumber]) {
+          conversionProgress[chartNumber].message = `Generating tiles: ${pct}%`;
+        }
+        emit('tiles', pct);
+      }
+    });
+    appendLog(
+      chartNumber,
+      `Wrote ${result.tiles} tiles (z${result.minzoom}-z${result.maxzoom}) from ${result.features} features`
+    );
+  });
 }
 
 /**
@@ -897,6 +939,35 @@ async function rasterizeLandToMbtiles(opts: {
   appendLog(chartNumber, `Added ${added} overview tiles`);
 }
 
+/**
+ * Rasterize a land shapefile into a basemap MBTiles with the toolchain
+ * conversion-backend.ts picks for it.
+ */
+async function rasterizeLand(opts: {
+  shp: string;
+  workDir: string;
+  outputPath: string;
+  width: number;
+  chartNumber: string;
+  statusFn: StatusCallback;
+}): Promise<void> {
+  const { chartNumber } = opts;
+  const backend = await pickBackend(
+    chartNumber,
+    undefined,
+    [path.dirname(opts.shp), opts.workDir, path.dirname(opts.outputPath)],
+    opts.statusFn
+  );
+  setProgress(chartNumber, 'converting', 'Rasterizing land polygons...');
+  if (backend === 'container') {
+    await rasterizeLandInContainer({ ...opts, label: chartNumber, report: reporter(chartNumber) });
+    return;
+  }
+  await withWorkerPool(getCpuBudget().workersPerJob, undefined, (pool) =>
+    rasterizeLandToMbtiles({ ...opts, pool })
+  );
+}
+
 /** Overwrite metadata rows; best-effort. */
 function setRasterMetadata(file: string, rows: Record<string, string>): void {
   try {
@@ -1024,16 +1095,14 @@ export async function processGshhg(
   const outputName = `gshhg-basemap-${resolution}.mbtiles`;
   const outputPath = path.join(chartsDir, outputName);
 
-  await withWorkerPool(getCpuBudget().workersPerJob, undefined, (pool) =>
-    rasterizeLandToMbtiles({
-      shp: path.join(shpDir, 'GSHHS_shp', resolution, `GSHHS_${resolution}_L1.shp`),
-      workDir: tmpDir,
-      outputPath,
-      width: rasterSize,
-      chartNumber,
-      pool
-    })
-  );
+  await rasterizeLand({
+    shp: path.join(shpDir, 'GSHHS_shp', resolution, `GSHHS_${resolution}_L1.shp`),
+    workDir: tmpDir,
+    outputPath,
+    width: rasterSize,
+    chartNumber,
+    statusFn
+  });
 
   setRasterMetadata(outputPath, {
     name: `GSHHG World Basemap (${resLabels[resolution] ?? resolution})`,
@@ -1107,16 +1176,14 @@ export async function processShpBasemap(
     const outputName = `osm-basemap-${chartNumber.replace('basemap_', '')}.mbtiles`;
     const outputPath = path.join(chartsDir, outputName);
 
-    await withWorkerPool(getCpuBudget().workersPerJob, undefined, (pool) =>
-      rasterizeLandToMbtiles({
-        shp: landShp,
-        workDir: tmpDir,
-        outputPath,
-        width: res.size,
-        chartNumber,
-        pool
-      })
-    );
+    await rasterizeLand({
+      shp: landShp,
+      workDir: tmpDir,
+      outputPath,
+      width: res.size,
+      chartNumber,
+      statusFn
+    });
 
     setRasterMetadata(outputPath, {
       name: `OSM Basemap (${res.label})`,

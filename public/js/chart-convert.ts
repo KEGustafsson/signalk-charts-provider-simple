@@ -13,6 +13,11 @@ interface ConvertJob {
 
 interface S57StatusResponse {
   conversions?: Record<string, { status: string; message?: string; log?: string[] }>;
+  conversionAvailable?: boolean;
+  conversionEngine?: 'container' | 'wasm';
+  conversionEnginePreference?: 'auto' | 'container' | 'wasm';
+  wasmConverter?: string;
+  containerRuntimeVersion?: string | null;
 }
 
 interface ConvertUploadResponse {
@@ -50,15 +55,18 @@ function initConvertTab(): void {
 
   output.innerHTML = `
     <div class="catalog-container">
+      <div id="convertEngineNote" class="catalog-source-note" hidden></div>
       <div class="convert-section">
         <h2>Convert S-57 ENC Charts</h2>
         <p class="description">
           Upload a ZIP file containing S-57 ENC files (.000) from your national hydrographic office,
           or convert a folder of them that is already on the Signal K server.
-          Charts are converted to vector MBTiles inside Signal K, with
-          <a href="https://gdal.org/" target="_blank" rel="noopener">GDAL</a> compiled to WebAssembly
-          (<a href="https://gdal3.js.org/" target="_blank" rel="noopener">gdal3.js</a>); no container
-          runtime is needed.
+          Charts are converted to vector MBTiles with
+          <a href="https://gdal.org/" target="_blank" rel="noopener">GDAL</a> and
+          <a href="https://github.com/felt/tippecanoe" target="_blank" rel="noopener">tippecanoe</a>
+          in a helper container when one is available, or inside Signal K with GDAL compiled to
+          WebAssembly (<a href="https://gdal3.js.org/" target="_blank" rel="noopener">gdal3.js</a>),
+          which needs no container runtime.
         </p>
         <div class="convert-upload-area" id="s57DropZone">
           <div class="convert-upload-icon">
@@ -102,8 +110,9 @@ function initConvertTab(): void {
         <p class="description">
           Upload a ZIP file containing BSB raster charts (.kap files), or convert a folder of
           them that is already on the Signal K server.
-          Charts are converted to MBTiles inside Signal K, with
-          <a href="https://gdal.org/" target="_blank" rel="noopener">GDAL</a> compiled to WebAssembly.
+          Charts are converted to MBTiles with
+          <a href="https://gdal.org/" target="_blank" rel="noopener">GDAL</a>, in a helper container
+          when one is available, or inside Signal K with GDAL compiled to WebAssembly.
         </p>
         <div class="convert-upload-area" id="rncDropZone">
           <div class="convert-upload-icon">
@@ -131,6 +140,7 @@ function initConvertTab(): void {
       <div id="convertJobs"></div>
     </div>
   `;
+  void showConvertEngine();
 
   // Set up drag-and-drop and click handlers
   setupDropZone('s57DropZone', 's57FileInput');
@@ -236,6 +246,54 @@ function setupDropZone(zoneId: string, inputId: string): void {
       }
     }
   };
+}
+
+/** Say which toolchain converts charts on this server. */
+async function showConvertEngine(): Promise<void> {
+  const note = document.getElementById('convertEngineNote');
+  if (!note) {
+    return;
+  }
+  let data: S57StatusResponse;
+  try {
+    const resp = await fetch(`${CONVERT_API_BASE}/catalog-s57-status`);
+    if (!resp.ok) {
+      return;
+    }
+    data = (await resp.json()) as S57StatusResponse;
+  } catch {
+    return;
+  }
+  const wasm = `the built-in GDAL (WebAssembly${
+    data.wasmConverter ? `, ${convertEscapeHtml(data.wasmConverter)}` : ''
+  })`;
+  const container = `GDAL and tippecanoe in a helper container${
+    data.containerRuntimeVersion ? ` (${convertEscapeHtml(data.containerRuntimeVersion)})` : ''
+  }`;
+  const signalkContainer =
+    '<a href="https://github.com/dirkwa/signalk-container" target="_blank" rel="noopener">signalk-container</a>';
+  if (data.conversionAvailable === false) {
+    note.innerHTML =
+      `<strong>Chart conversion is set to use a helper container, but none is available.</strong> ` +
+      `Install the ${signalkContainer} plugin from the App Store, or set the conversion engine ` +
+      `to automatic in the plugin configuration.`;
+  } else if (data.conversionEngine === 'container') {
+    note.innerHTML =
+      `Charts are converted with ${container}, through the ${signalkContainer} plugin.` +
+      (data.conversionEnginePreference === 'container'
+        ? ''
+        : ` If a conversion cannot run there, ${wasm} converts it instead.`);
+  } else if (data.conversionEnginePreference === 'wasm') {
+    note.innerHTML = `Charts are converted with ${wasm}, as set in the plugin configuration.`;
+  } else if (data.conversionEngine === 'wasm') {
+    note.innerHTML =
+      `Charts are converted with ${wasm}; no container runtime is needed. ` +
+      `With the ${signalkContainer} plugin and Docker or Podman, they are converted with GDAL ` +
+      `and tippecanoe in a helper container instead.`;
+  } else {
+    return;
+  }
+  note.hidden = false;
 }
 
 async function handleConvertFile(input: HTMLInputElement, type: 's57' | 'rnc'): Promise<void> {

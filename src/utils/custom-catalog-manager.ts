@@ -42,7 +42,14 @@ const MAX_LOG_LINES = MAX_CATALOG_MANAGER_LOG_LINES;
 export type CustomCatalogStatus = 'empty' | 'out_of_date' | 'downloaded' | 'converted';
 
 export type CustomCatalogPhase =
-  'preparing' | 'downloading' | 'converting' | 'completed' | 'cancelling' | 'cancelled' | 'failed';
+  | 'preparing'
+  | 'downloading'
+  | 'converting'
+  | 'joining'
+  | 'completed'
+  | 'cancelling'
+  | 'cancelled'
+  | 'failed';
 
 /** Structured progress that drives the Custom Catalogs UI (two bars + map). */
 export interface CustomCatalogProgressDetail {
@@ -572,7 +579,8 @@ export function setCatalogDetail(id: string, detail: Partial<CustomCatalogProgre
 // ---- Cancellation ----
 
 // Per-run abort controller. The flow registers one at start; cancel aborts it,
-// which terminates the conversion's worker threads mid-stage. The
+// which kills the in-flight container job (signalk-container >= 1.16.0) or
+// terminates the conversion's worker threads mid-stage. The
 // cancelRequested flag remains the boundary-cancel signal and the way the flow
 // distinguishes a cancel from a genuine failure.
 const abortControllers = new Map<string, AbortController>();

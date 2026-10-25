@@ -1,12 +1,67 @@
 # Chart conversion
 
 The plugin converts S-57 ENC, BSB/KAP raster charts, pilot charts and
-shapefile basemaps to MBTiles inside the Signal K process. Nothing else has to
-be installed: no Docker or Podman, no helper container image, no
-`signalk-container` plugin, no GDAL or tippecanoe on the host. A Raspberry Pi,
-a Signal K container and a bare-metal server convert the same way.
+shapefile basemaps to MBTiles with one of two toolchains:
 
-## The pieces
+- **The container toolchain** (preferred): GDAL, tippecanoe and tile-join in
+  the `charts-toolbox` image, run as helper jobs through the
+  [`signalk-container`](https://github.com/dirkwa/signalk-container) plugin
+  (`src/utils/s57-container.ts`, `src/utils/rnc-container.ts`; the image is
+  described in [charts-toolbox-image.md](charts-toolbox-image.md)).
+- **The WebAssembly toolchain** (fallback): GDAL compiled to WebAssembly and a
+  built-in vector tiler, inside the Signal K process. Nothing else has to be
+  installed: no Docker or Podman, no helper image, no `signalk-container`, no
+  GDAL or tippecanoe on the host. A Raspberry Pi, a Signal K container and a
+  bare-metal server convert the same way. Most of this page describes it.
+
+## Choosing the toolchain
+
+`src/utils/conversion-backend.ts` picks the toolchain once per conversion,
+before it writes anything, so a fallback never meets a half-finished container
+run. The container toolchain is used when all of these hold:
+
+1. `signalk-container` published its manager and detected a Docker or Podman
+   runtime. A conversion requested while the startup discovery (up to 30 s)
+   still runs waits for it; a manager published after the discovery gave up
+   is taken up once its runtime is detected.
+2. The `charts-toolbox` image is present, or could be pulled now. A boat
+   offline without the image converts with WebAssembly instead of failing.
+3. Every folder the conversion mounts resolves to a mount source for the
+   helper container (`resolveHostPath`). S-57 cells are staged (hardlinked,
+   or copied across file systems) into the conversion's scratch folder in the
+   data dir, with their update files, so a folder of cells outside the data
+   dir still converts in the container; BSB charts are read where they lie,
+   so a folder the container cannot mount falls back.
+
+Otherwise the WebAssembly toolchain runs, and the conversion log says why. The
+plugin's `conversionEngine` setting pins a toolchain: `container` fails a
+conversion it cannot run there, with the reason, and `wasm` never looks for a
+container. `GET /catalog-s57-status` reports the runtime and the toolchain the
+next conversion is expected to use; the Convert tab shows it.
+
+What differs between the two:
+
+| | Container | WebAssembly |
+|---|---|---|
+| S-57 tiling | One tippecanoe per IHO band, then tile-join (`join` progress stage, `joining` chart-set phase); a single-band bundle runs one tippecanoe with its maxzoom clamped to the band's | Every band in one pass of the built-in tiler |
+| Raster overviews | `gdaladdo -r average` | Averaged from the tiles below (`raster-pyramid.ts`) |
+| CPU budget | `tippecanoeThreadsPerJob`, `gdalExportParallelism`, enforced as the job's CPU cap | `workersPerJob` worker threads |
+| Cancel | Kills the job (signalk-container >= 1.16.0), else stops at the next band | Terminates the worker threads |
+
+Both share the rest: archive extraction in JavaScript (ZIP, `.tar`,
+`.tar.gz`, `.tar.xz`), one cell of each name (`uniqueCells`), output naming,
+metadata patches, the quarantine, and the chart-set cache. The cache keys
+each cell's GeoJSON by the GDAL build that wrote it (`backendBuildId`: the
+charts-toolbox image, or the gdal3.js version), so a chart set whose
+toolchain changed reads its cells again once. A chart set's run picks its
+toolchain once, for both its GDAL export and its tiling.
+
+Helper containers left running by a Signal K crash are reaped at the
+process's first start, once signalk-container is found and before this
+process has started a job of its own: start() runs again on every config
+save while the previous start's conversions keep running.
+
+## The WebAssembly toolchain
 
 ```
               ┌─────────── conversion worker threads (worker-pool.ts) ───────────┐
@@ -43,7 +98,7 @@ a Signal K container and a bare-metal server convert the same way.
   are read in JavaScript (xz through the WebAssembly decoder of
   `xz-decompress`), zip-slip-safe, links skipped.
 
-## S-57: one pass for every band
+### S-57: one pass for every band
 
 An ENC bundle mixes IHO usage bands, from overview (band 1) to berthing
 (band 6). Each band is meant to be seen at its own scales: a harbour plan's
@@ -60,7 +115,7 @@ Two copies of a cell, such as a folder of cells beside the ZIP it came from,
 would write the same GeoJSON files, so only the first copy found is
 converted and the others are logged as skipped.
 
-## The vector tiler
+### The vector tiler
 
 The tiler takes GeoJSON files, each with an output layer and a zoom range, and
 writes an MBTiles. The heavy steps (reading the GeoJSON, sorting features into
@@ -106,7 +161,7 @@ attributes (`COLOUR`, `CATLIT`, …) are joined with commas and null attributes
 dropped. The MBTiles `json` metadata lists every layer with its zoom range and
 attribute types.
 
-## Raster charts and basemaps
+### Raster charts and basemaps
 
 GDAL's translate API, called in the workers, tiles a BSB/KAP chart into a PNG
 MBTiles at its native zoom. Overview zooms are then added below it
@@ -129,7 +184,9 @@ that cannot be read is skipped and reported. A path that holds
 more than `MAX_SCAN_ENTRIES` entries, such as a disk's root, is refused once
 the search reaches that many, instead of being searched in full.
 
-The source is only read. Loose charts are converted where they lie, and ZIP
+The source is only read. Loose charts are converted where they lie (the
+container toolchain stages S-57 cells into its scratch folder first, see
+above), and ZIP
 files are extracted into a new `convert-local-…` folder in the plugin's data
 directory, removed when the conversion ends. Leftover work folders are swept
 only at the server process's first start, so a plugin restart meanwhile (a
@@ -141,7 +198,9 @@ inside the container, so the folder must be mounted into it.
 ## Caches and versions
 
 The chart-set cache keeps each cell's GeoJSON between runs, keyed by the
-GDAL build that wrote it (`gdalBuildId()`, the pinned gdal3.js version). A
-GeoJSON written by another GDAL build makes the next update export its cell
-again. The ENC index builder
-(`src/catalog/enc-index-cli.ts`) reads cells with the same GDAL.
+GDAL build that wrote it (`backendBuildId()`: the charts-toolbox image for the
+container toolchain, `gdalBuildId()`, the pinned gdal3.js version, for the
+WebAssembly one). A GeoJSON written by another GDAL build makes the next
+update export its cell again. The ENC index builder
+(`src/catalog/enc-index-cli.ts`) reads cells with the WebAssembly GDAL, so
+its CI job needs no container runtime.

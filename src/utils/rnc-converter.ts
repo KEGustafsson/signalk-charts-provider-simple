@@ -2,6 +2,12 @@ import fs from 'fs';
 import path from 'path';
 import unzipper from 'unzipper';
 import { getCpuBudget } from './concurrency.js';
+import {
+  chooseConversionBackend,
+  describeBackend,
+  fallbackNote,
+  type ConversionReport
+} from './conversion-backend.js';
 import { MAX_CONVERSION_LOG_LINES } from './conversion-log.js';
 import { setConversionResult } from './conversion-progress.js';
 import {
@@ -11,6 +17,7 @@ import {
 } from './local-chart-source.js';
 import { setMbtilesType } from './mbtiles-metadata.js';
 import { addRasterOverviews } from './raster-pyramid.js';
+import { convertKapFilesInContainer } from './rnc-container.js';
 import { extractTarArchive } from './tar-extract.js';
 import { TaskFailedError, forEachConcurrent, withWorkerPool } from './worker-pool.js';
 import type {
@@ -134,7 +141,7 @@ async function convertBsbCharts(
 
   statusFn('converting', `Converting ${kapFiles.length} BSB chart(s) to MBTiles...`);
   setConvertProgress(chartNumber, 'converting', `Converting ${kapFiles.length} chart(s)...`);
-  const mbtilesFiles = await convertKapFiles(kapFiles, chartsDir, chartNumber);
+  const mbtilesFiles = await convertKapFiles(kapFiles, chartsDir, chartNumber, statusFn);
 
   if (mbtilesFiles.length === 0) {
     throw new Error('No charts converted');
@@ -197,18 +204,99 @@ export async function processRncLocal(
 }
 
 /**
- * Convert BSB/KAP charts to raster MBTiles in `chartsDir`, one per chart, on
- * the conversion's worker threads: GDAL (WebAssembly) tiles each chart at its
- * native zoom, then overview zooms are built below it. A chart that fails is
- * logged and skipped. Returns the file names written.
+ * Convert BSB/KAP charts to raster MBTiles in `chartsDir`, one per chart:
+ * each chart is tiled at its native zoom, then overview zooms are built below
+ * it, with the toolchain conversion-backend.ts picks (the container one when
+ * it can mount every chart's folder). A chart that fails is logged and
+ * skipped. Returns the file names written.
  */
 async function convertKapFiles(
   kapFiles: readonly string[],
   chartsDir: string,
-  chartNumber: string
+  chartNumber: string,
+  statusFn: StatusCallback
 ): Promise<string[]> {
-  const converted: (string | null)[] = kapFiles.map(() => null);
   const outputNames = chartOutputNames(kapFiles);
+  const choice = await chooseConversionBackend({
+    mountPaths: [...new Set(kapFiles.map((f) => path.dirname(f))), chartsDir],
+    debug: (msg) => {
+      debug(msg);
+    },
+    onCheckingImage: () => {
+      statusFn('pulling', 'Checking charts-toolbox image...');
+      setConvertProgress(chartNumber, 'pulling', 'Checking charts-toolbox image...');
+    }
+  });
+  const note = fallbackNote(choice);
+  if (note) {
+    debug(note);
+    appendLog(chartNumber, note);
+  }
+  appendLog(chartNumber, `Conversion engine: ${describeBackend(choice.backend)}`);
+  setConvertProgress(chartNumber, 'converting', `Converting ${kapFiles.length} chart(s)...`);
+
+  const written =
+    choice.backend === 'container'
+      ? await convertKapFilesInContainer(
+          kapFiles,
+          chartsDir,
+          outputNames,
+          chartNumber,
+          reporter(chartNumber)
+        )
+      : await convertKapFilesWithWasm(kapFiles, chartsDir, outputNames, chartNumber);
+
+  const converted: string[] = [];
+  for (const [index, kap] of kapFiles.entries()) {
+    const outputPath = path.join(chartsDir, outputNames[index]);
+    if (!written[index] || !fs.existsSync(outputPath)) {
+      continue;
+    }
+    const tagResult = await setMbtilesType(outputPath, 'tilelayer', {
+      onMessage: (msg) => {
+        appendLog(chartNumber, msg);
+      }
+    });
+    if (!tagResult.ok) {
+      appendLog(chartNumber, `Warning: failed to set tilelayer metadata for ${path.basename(kap)}`);
+    }
+    converted.push(outputNames[index]);
+  }
+  return converted;
+}
+
+/** The sinks the container toolchain reports `chartNumber`'s conversion through. */
+function reporter(chartNumber: string): ConversionReport {
+  return {
+    log: (text) => {
+      appendLog(chartNumber, text);
+    },
+    progress: (status, message) => {
+      setConvertProgress(chartNumber, status, message);
+    },
+    message: (text) => {
+      if (chartNumber && conversionProgress[chartNumber]) {
+        conversionProgress[chartNumber].message = text;
+      }
+    },
+    debug: (msg) => {
+      debug(msg);
+    }
+  };
+}
+
+/**
+ * The WebAssembly toolchain for `convertKapFiles`: GDAL tiles each chart on
+ * the conversion's worker threads, then overview zooms are averaged from the
+ * tiles below. Returns, per chart, whether its MBTiles was written.
+ */
+async function convertKapFilesWithWasm(
+  kapFiles: readonly string[],
+  chartsDir: string,
+  outputNames: readonly string[],
+  chartNumber: string
+): Promise<boolean[]> {
+  const written = kapFiles.map(() => false);
   let started = 0;
   await withWorkerPool(getCpuBudget().workersPerJob, undefined, async (pool) => {
     await forEachConcurrent(kapFiles, pool.size, async (kap, index) => {
@@ -253,22 +341,10 @@ async function convertKapFiles(
         }
         appendLog(chartNumber, `Warning: adding overviews failed for ${friendly}`);
       }
-
-      const tagResult = await setMbtilesType(outputPath, 'tilelayer', {
-        onMessage: (msg) => {
-          appendLog(chartNumber, msg);
-        }
-      });
-      if (!tagResult.ok) {
-        appendLog(chartNumber, `Warning: failed to set tilelayer metadata for ${friendly}`);
-      }
-
-      if (fs.existsSync(outputPath)) {
-        converted[index] = outputName;
-      }
+      written[index] = true;
     });
   });
-  return converted.filter((f): f is string => f !== null);
+  return written;
 }
 
 export async function processRncZip(
@@ -367,7 +443,7 @@ export async function processPilotTar(
 
     statusFn('converting', `Converting ${kapFiles.length} chart(s)...`);
     setConvertProgress(chartNumber, 'converting', `Converting ${kapFiles.length} chart(s)...`);
-    const mbtilesFiles = await convertKapFiles(kapFiles, chartsDir, chartNumber);
+    const mbtilesFiles = await convertKapFiles(kapFiles, chartsDir, chartNumber, statusFn);
 
     if (mbtilesFiles.length === 0) {
       throw new Error('No charts converted');
