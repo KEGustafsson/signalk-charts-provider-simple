@@ -72,7 +72,7 @@ import {
   removeFolderState
 } from './utils/folder-state.js';
 import { getCpuBudget, setCpuBudget } from './utils/concurrency.js';
-import { PLUGIN_OWNER_ID, hasStartedJobs } from './utils/container-jobs.js';
+import { PLUGIN_OWNER_ID, hasStartedJobs, holdJobsDuring } from './utils/container-jobs.js';
 import { getContainerManager, waitForContainerManager } from './utils/container-manager.js';
 import {
   backendBuildId,
@@ -726,13 +726,16 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     }
     orphanReapDone = true;
     try {
-      const cleanup = await containerManager.cleanupOrphanedJobs({
-        ownerPluginId: PLUGIN_OWNER_ID
-      });
-      // The next start reaps them again.
-      if (lifecycle !== started) {
-        return;
-      }
+      // Synchronously after the hasStartedJobs check, so no job of ours can
+      // start before the reap and be removed by it.
+      const cleanup = await holdJobsDuring(
+        containerManager.cleanupOrphanedJobs({
+          ownerPluginId: PLUGIN_OWNER_ID
+        })
+      );
+      // The rollback below clears process-wide conversion state, and reaping
+      // runs once per process, so it goes on even if a config save restarted
+      // the plugin meanwhile.
       // Labels we set on runJob calls have the form `<stage>-<chartNumber>`,
       // where <stage> is one of a fixed set of strings. A greedy
       // `replace(/^[a-z-]+-/, '')` would corrupt chartNumbers that themselves

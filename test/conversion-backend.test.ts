@@ -24,6 +24,7 @@ import {
   type ContainerManagerApi
 } from '../dist/utils/container-manager.js';
 import { CHARTS_TOOLBOX_IMAGE } from '../dist/utils/container-images.js';
+import { hasStartedJobs, holdJobsDuring, runJob } from '../dist/utils/container-jobs.js';
 import { getConversionProgress, processS57Directory } from '../dist/utils/s57-converter.js';
 
 declare global {
@@ -171,6 +172,29 @@ describe('chooseConversionBackend', () => {
     globalThis.__signalk_containerManager = fakeManager().manager;
     const choice = await chooseConversionBackend({ mountPaths: [os.tmpdir()] });
     assert.strictEqual(choice.backend, 'container');
+  });
+});
+
+describe('runJob during an orphan reap', () => {
+  it('starts no helper job until the reap is done', async () => {
+    const fake = fakeManager();
+    globalThis.__signalk_containerManager = fake.manager;
+    assert.strictEqual(await waitForContainerManager({ budgetMs: 1000 }), fake.manager);
+    let finishReap: () => void = () => {};
+    const reap = holdJobsDuring(
+      new Promise<void>((resolve) => {
+        finishReap = resolve;
+      })
+    );
+    const job = runJob({ image: CHARTS_TOOLBOX_IMAGE, command: ['true'] });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.strictEqual(fake.jobs.length, 0, 'the job must wait for the reap');
+    assert.strictEqual(hasStartedJobs(), false);
+    finishReap();
+    await reap;
+    assert.strictEqual((await job).exitCode, 0);
+    assert.strictEqual(fake.jobs.length, 1);
+    assert.strictEqual(hasStartedJobs(), true);
   });
 });
 

@@ -170,6 +170,22 @@ describe('inspectLocalChartSource', () => {
   });
 });
 
+describe('inspectLocalChartSource and links', () => {
+  it('finds only charts inside the chosen folder, never through a link out of it', async () => {
+    const outside = path.join(TMP, 'links-outside');
+    write(path.join(outside, 'US5OUT01.000'));
+    const dir = path.join(TMP, 'links-root');
+    write(path.join(dir, 'ENC_ROOT', 'US5IN001', 'US5IN001.000'));
+    // A junction needs no privilege on Windows; elsewhere the type is ignored.
+    fs.symlinkSync(outside, path.join(dir, 'ENC_ROOT', 'elsewhere'), 'junction');
+    const source = await inspectLocalChartSource(dir, isS57Cell, 'S-57 cells');
+    assert.deepEqual(source.looseFiles, [path.join(dir, 'ENC_ROOT', 'US5IN001', 'US5IN001.000')]);
+    for (const file of source.looseFiles) {
+      assert.ok(!path.relative(dir, file).startsWith('..'), `${file} is outside ${dir}`);
+    }
+  });
+});
+
 describe('extractLocalChartSource', () => {
   it('returns loose files in place and extracted ones, without touching the source', async () => {
     const dir = path.join(TMP, 'extract');

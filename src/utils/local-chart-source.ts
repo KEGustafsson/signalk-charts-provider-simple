@@ -105,10 +105,11 @@ export async function inspectLocalChartSource(
     candidateZips.push(root);
   } else if (stat.isDirectory()) {
     let visited = 0;
-    const walk = (dir: string): void => {
+    // Asynchronous, so a large folder never holds up the server's event loop.
+    const walk = async (dir: string): Promise<void> => {
       let entries: fs.Dirent[];
       try {
-        entries = fs.readdirSync(dir, { withFileTypes: true });
+        entries = await fs.promises.readdir(dir, { withFileTypes: true });
       } catch {
         // An unreadable subfolder holds nothing this conversion can use.
         return;
@@ -122,8 +123,12 @@ export async function inspectLocalChartSource(
         }
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) {
-          if (!entry.name.startsWith('.') && entry.name !== 'node_modules') {
-            walk(full);
+          if (
+            !entry.name.startsWith('.') &&
+            entry.name !== 'node_modules' &&
+            (await isRealDirectory(full))
+          ) {
+            await walk(full);
           }
         } else if (entry.isFile()) {
           if (isChartFile(entry.name)) {
@@ -134,7 +139,7 @@ export async function inspectLocalChartSource(
         }
       }
     };
-    walk(root);
+    await walk(root);
   } else {
     throw new LocalSourceError(`${root} is not a folder or a ZIP file`);
   }
@@ -160,19 +165,34 @@ export async function inspectLocalChartSource(
   return { root, name, looseFiles: looseFiles.sort(), zips: zips.sort(), unreadableZips };
 }
 
-function findChartFiles(dir: string, isChartFile: ChartFileTest): string[] {
+/**
+ * Whether `dir` is still a directory, not a link to one: the walk lists a
+ * folder and then descends into it, and in between a folder could be
+ * replaced by a link that would take the walk outside the chosen root.
+ */
+async function isRealDirectory(dir: string): Promise<boolean> {
+  try {
+    return (await fs.promises.lstat(dir)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+async function findChartFiles(dir: string, isChartFile: ChartFileTest): Promise<string[]> {
   const found: string[] = [];
-  const walk = (d: string): void => {
-    for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+  const walk = async (d: string): Promise<void> => {
+    for (const entry of await fs.promises.readdir(d, { withFileTypes: true })) {
       const full = path.join(d, entry.name);
       if (entry.isDirectory()) {
-        walk(full);
+        if (await isRealDirectory(full)) {
+          await walk(full);
+        }
       } else if (entry.isFile() && isChartFile(entry.name)) {
         found.push(full);
       }
     }
   };
-  walk(dir);
+  await walk(dir);
   return found.sort();
 }
 
@@ -193,7 +213,7 @@ export async function extractLocalChartSource(
     const dest = path.join(workDir, `archive-${String(index + 1)}`);
     fs.mkdirSync(dest, { recursive: true });
     await extractZipSafely(zip, dest);
-    files.push(...findChartFiles(dest, isChartFile));
+    files.push(...(await findChartFiles(dest, isChartFile)));
   }
   return files;
 }
