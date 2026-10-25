@@ -40,6 +40,8 @@ export interface TileSource {
   maxzoom: number;
   /** GeoJSON files (`.geojson`, or gzipped `.geojson.gz`). */
   files: string[];
+  /** S-57 features: each with a SCAMIN starts at the zoom S-52 shows it at. */
+  scamin?: boolean;
 }
 
 export interface VectorTilerOptions {
@@ -105,11 +107,17 @@ export function groupSources(sources: readonly TileSource[]): {
     if (source.minzoom > source.maxzoom || source.files.length === 0) {
       continue;
     }
-    const key = `${source.layer}\u0000${String(source.minzoom)}\u0000${String(source.maxzoom)}`;
+    const scamin = source.scamin === true;
+    const key = `${source.layer}\u0000${String(source.minzoom)}\u0000${String(source.maxzoom)}\u0000${String(scamin)}`;
     let group = byKey.get(key);
     if (group === undefined) {
       group = groups.length;
-      groups.push({ layer: source.layer, minzoom: source.minzoom, maxzoom: source.maxzoom });
+      groups.push({
+        layer: source.layer,
+        minzoom: source.minzoom,
+        maxzoom: source.maxzoom,
+        ...(scamin ? { scamin } : {})
+      });
       byKey.set(key, group);
     }
     for (const file of source.files) {

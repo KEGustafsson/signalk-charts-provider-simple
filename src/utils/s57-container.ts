@@ -37,6 +37,7 @@ import {
   exportErrorReport,
   geojsonContentSize
 } from './s57-export-files.js';
+import { scaminMinzoom } from './s57-scamin.js';
 
 // Stop the pipeline when a container job was killed by an abort signal
 // (signalk-container >= 1.16.0). Checked before the exit-code check, since a
@@ -323,8 +324,16 @@ type ConsolidatedLayer = { file: string; sourceFiles: string[] };
 // below that zoom. (Tippecanoe's `-L` JSON form does NOT support per-layer
 // minzoom — silently ignored — so we MUST set it per-feature.) Source
 // charts that don't follow the IHO Annex E filename convention (IENC,
-// hand-named) get no extension property and fall back to the global `-Z`.
-function consolidateGeoJSONByLayer(geojsonDir: string, userMinzoom: number): ConsolidatedLayer[] {
+// hand-named) get no band floor and fall back to the global `-Z`.
+//
+// A feature's own SCAMIN can raise its minzoom further (see
+// `scaminMinzoom`), capped at `maxzoom` so the feature still reaches the
+// deepest tiles that clients overzoom.
+function consolidateGeoJSONByLayer(
+  geojsonDir: string,
+  userMinzoom: number,
+  maxzoom = 16
+): ConsolidatedLayer[] {
   // `.geojson.gz` is what the chart-set cache keeps; it reads the same.
   const files = fs
     .readdirSync(geojsonDir)
@@ -379,8 +388,17 @@ function consolidateGeoJSONByLayer(geojsonDir: string, userMinzoom: number): Con
           fs.writeSync(handle, ',\n');
         }
         const flattened = flattenListProperties(feat);
+        const scaminZoom = scaminMinzoom(flattened);
+        const minzoomCandidates = [featureMinzoom, scaminZoom].filter(
+          (z): z is number => z !== null
+        );
         const stamped =
-          featureMinzoom !== null ? withTippecanoeMinzoom(flattened, featureMinzoom) : flattened;
+          minzoomCandidates.length > 0
+            ? withTippecanoeMinzoom(
+                flattened,
+                Math.min(maxzoom, Math.max(userMinzoom, ...minzoomCandidates))
+              )
+            : flattened;
         fs.writeSync(handle, JSON.stringify(stamped));
         first = false;
       }
@@ -529,6 +547,7 @@ function stampMbtilesName(outputPath: string, name: string): void {
 
 export const _testInternals = {
   consolidateGeoJSONByLayer,
+  scaminMinzoom,
   buildExportScript,
   bandClampedMaxzoom,
   buildLayerManifest,
@@ -558,7 +577,7 @@ async function runTippecanoe(
   // Merge per-chart-per-layer GeoJSON into one file per layer before invoking
   // tippecanoe. A typical NOAA bundle of 4 charts × ~30 layers used to mean
   // 120 -L args; consolidating drops that to ~30.
-  const mergedLayers = consolidateGeoJSONByLayer(geojsonDir, minzoom);
+  const mergedLayers = consolidateGeoJSONByLayer(geojsonDir, minzoom, maxzoom);
   if (mergedLayers.length === 0) {
     throw new Error('No valid GeoJSON layers to process');
   }

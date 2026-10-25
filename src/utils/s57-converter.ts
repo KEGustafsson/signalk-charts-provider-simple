@@ -393,7 +393,9 @@ export function bandZoomRange(
  * harbour cell's features thus never crowd the overview zooms, and a band-2
  * cell's coarse coastline never draws over a harbour plan, in one pass over
  * the whole bundle. Cells whose names don't follow the IHO convention (IENC,
- * hand-named) use the user's range. Empty exports are skipped.
+ * hand-named) use the user's range. Within it, a feature with a SCAMIN
+ * starts at the zoom S-52 shows it at (s57-scamin.ts). Empty exports are
+ * skipped.
  */
 export function planTileSources(
   geojsonDir: string,
@@ -416,7 +418,7 @@ export function planTileSources(
       continue;
     }
     const key = `${layer}/${String(minzoom)}/${String(maxzoom)}`;
-    const source = sources.get(key) ?? { layer, minzoom, maxzoom, files: [] };
+    const source = sources.get(key) ?? { layer, minzoom, maxzoom, files: [], scamin: true };
     source.files.push(fullPath);
     sources.set(key, source);
   }

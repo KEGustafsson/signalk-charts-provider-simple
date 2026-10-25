@@ -23,13 +23,23 @@ import { VectorTile } from '@mapbox/vector-tile';
 import GeoJSONVT from 'geojson-vt';
 import { PbfReader } from 'pbf';
 import { fromGeojsonVt, fromVectorTileJs } from 'vt-pbf';
+import { scaminMinzoom } from './s57-scamin.js';
 
 export interface ShardGroup {
   /** Output layer name; several groups may share one. */
   layer: string;
   minzoom: number;
   maxzoom: number;
+  /**
+   * S-57 features: a feature with a SCAMIN appears only from the zoom S-52
+   * shows it at (s57-scamin.ts), within the group's zooms.
+   */
+  scamin?: boolean;
 }
+
+// The property a feature's own minzoom travels in, from bucketing to the
+// tiles; never written to a tile.
+const FEATURE_MINZOOM_KEY = '\u0000minzoom';
 
 export interface ShardTask {
   /** The shard's part files, one per bucketing task that wrote to it. */
@@ -408,11 +418,20 @@ export function tileShard(task: ShardTask, emit: (tiles: EncodedTile[]) => void)
       }
       next.push(g);
       if (z >= g.minzoom) {
-        const entry = (layers[g.layer] ??= { features: [] });
         for (const f of tile.features) {
-          entry.features.push(f);
+          const own = f.tags?.[FEATURE_MINZOOM_KEY];
+          if (typeof own === 'number') {
+            if (z < own) {
+              continue;
+            }
+            const tags = { ...f.tags };
+            delete tags[FEATURE_MINZOOM_KEY];
+            (layers[g.layer] ??= { features: [] }).features.push({ ...f, tags });
+          } else {
+            (layers[g.layer] ??= { features: [] }).features.push(f);
+          }
+          hasLayer = true;
         }
-        hasLayer = true;
       }
     }
     if (hasLayer) {
@@ -658,7 +677,9 @@ export function bucketFeatures(task: BucketTask): BucketResult {
       if (!box) {
         continue;
       }
-      const properties = tileProperties(feature.properties);
+      const properties: Record<string, string | number | boolean> = tileProperties(
+        feature.properties
+      );
       for (const [key, value] of Object.entries(properties)) {
         const type: FieldType =
           typeof value === 'number' ? 'Number' : typeof value === 'boolean' ? 'Boolean' : 'String';
@@ -670,6 +691,12 @@ export function bucketFeatures(task: BucketTask): BucketResult {
       bounds[2] = Math.max(bounds[2], box[2]);
       bounds[3] = Math.max(bounds[3], box[3]);
       features++;
+
+      // Recorded after the fields above, so it never shows in the metadata.
+      const own = meta.scamin ? scaminMinzoom(feature) : null;
+      if (own !== null && own > meta.minzoom) {
+        properties[FEATURE_MINZOOM_KEY] = Math.min(meta.maxzoom, own);
+      }
 
       const line = `${String(group)}\t${JSON.stringify({
         type: 'Feature',

@@ -111,6 +111,15 @@ and band, each shown at that band's zooms within the user's range
 (`planTileSources`, `BAND_MIN_ZOOM` / `BAND_MAX_ZOOM` in `s57-band.ts`). The
 tiler builds the whole bundle in one pass, with no per-band runs to join.
 
+Within its band's zooms, a feature with an S-57 `SCAMIN` starts only at the
+zoom where S-52 would show it (`s57-scamin.ts`): below that scale no client
+draws it, so overview tiles would only carry it, soundings above all. The
+zoom comes from the feature's position farthest from the equator, so no part
+of it is cut early, and is capped at the band's maxzoom so clients
+overzooming still show it. The tiler carries the zoom with the feature
+through the shards and leaves it out of the tile's attributes. The container
+toolchain stamps the same zoom as the feature's `tippecanoe.minzoom`.
+
 Two copies of a cell, such as a folder of cells beside the ZIP it came from,
 would write the same GeoJSON files, so only the first copy found is
 converted and the others are logged as skipped.

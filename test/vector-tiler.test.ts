@@ -80,6 +80,17 @@ describe('groupSources', () => {
       { path: 'a3', group: 1 }
     ]);
   });
+
+  it('keeps SCAMIN sources apart from plain ones of the same layer and zooms', () => {
+    const { groups } = groupSources([
+      { layer: 'A', minzoom: 9, maxzoom: 12, files: ['a1'], scamin: true },
+      { layer: 'A', minzoom: 9, maxzoom: 12, files: ['a2'] }
+    ]);
+    assert.deepStrictEqual(groups, [
+      { layer: 'A', minzoom: 9, maxzoom: 12, scamin: true },
+      { layer: 'A', minzoom: 9, maxzoom: 12 }
+    ]);
+  });
 });
 
 describe('buildVectorMbtiles', () => {
@@ -235,6 +246,92 @@ describe('buildVectorMbtiles', () => {
       .prepare('SELECT 1 FROM tiles WHERE zoom_level = 6 AND tile_column = ? AND tile_row = ?')
       .get(x, 2 ** 6 - 1 - y);
     assert.ok(row);
+  });
+});
+
+describe('buildVectorMbtiles and SCAMIN', () => {
+  let tmp: string;
+  let db: DatabaseSync;
+  // At 54° a tile shows 1:SCAMIN 90000 from z12 on (s57-scamin.ts).
+  const at = (lon: number): Position => [lon, 54.03];
+
+  before(async () => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sk-charts-scamin-'));
+    const soundings = [
+      { c: 'always' },
+      { c: 'coastal', SCAMIN: 90000 },
+      { c: 'berth', SCAMIN: 1000 },
+      { c: 'overview', SCAMIN: 1e9 }
+    ].map((properties, i) => ({
+      type: 'Feature',
+      properties,
+      geometry: { type: 'Point', coordinates: at(10.07 + i * 0.0001) }
+    }));
+    writeFC(path.join(tmp, 'soundg.geojson'), soundings);
+    writeFC(path.join(tmp, 'plain.geojson'), soundings);
+    const output = path.join(tmp, 'out.mbtiles');
+    await withWorkerPool(2, undefined, (pool) =>
+      buildVectorMbtiles({
+        sources: [
+          {
+            layer: 'SOUNDG',
+            minzoom: 9,
+            maxzoom: 14,
+            files: [path.join(tmp, 'soundg.geojson')],
+            scamin: true
+          },
+          { layer: 'PLAIN', minzoom: 9, maxzoom: 14, files: [path.join(tmp, 'plain.geojson')] }
+        ],
+        output,
+        scratchDir: path.join(tmp, 'scratch'),
+        pool,
+        name: 'SCAMIN chart'
+      })
+    );
+    db = new DatabaseSync(output);
+  });
+
+  after(() => {
+    db.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const featuresAt = (layer: string, z: number): string[] => {
+    const tile = readTileAt(db, 10.07, 54.03, z);
+    const l = tile?.layers[layer];
+    return Array.from({ length: l?.length ?? 0 }, (_, i) =>
+      String(l?.feature(i).properties.c)
+    ).sort();
+  };
+
+  it('leaves a feature out of tiles below the zoom its SCAMIN is reached at', () => {
+    assert.deepStrictEqual(featuresAt('SOUNDG', 9), ['always', 'overview']);
+    assert.deepStrictEqual(featuresAt('SOUNDG', 11), ['always', 'overview']);
+    assert.deepStrictEqual(featuresAt('SOUNDG', 12), ['always', 'coastal', 'overview']);
+    // Capped at the source's maxzoom, so clients overzooming still show it.
+    assert.deepStrictEqual(featuresAt('SOUNDG', 14), ['always', 'berth', 'coastal', 'overview']);
+  });
+
+  it('ignores SCAMIN for sources that do not ask for it', () => {
+    assert.deepStrictEqual(featuresAt('PLAIN', 9), ['always', 'berth', 'coastal', 'overview']);
+  });
+
+  it('never writes the carried zoom into a tile or the metadata', () => {
+    const tile = readTileAt(db, 10.07, 54.03, 14);
+    const l = tile?.layers.SOUNDG;
+    assert.ok(l);
+    for (let i = 0; i < l.length; i++) {
+      assert.deepStrictEqual(
+        Object.keys(l.feature(i).properties).filter((k) => k !== 'c' && k !== 'SCAMIN'),
+        []
+      );
+    }
+    const json = JSON.parse(
+      (db.prepare("SELECT value FROM metadata WHERE name = 'json'").get() as { value: string })
+        .value
+    ) as { vector_layers: { id: string; fields: Record<string, string> }[] };
+    const soundg = json.vector_layers.find((v) => v.id === 'SOUNDG');
+    assert.deepStrictEqual(soundg?.fields, { c: 'String', SCAMIN: 'Number' });
   });
 });
 

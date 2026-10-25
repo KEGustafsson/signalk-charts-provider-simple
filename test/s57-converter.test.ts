@@ -88,6 +88,15 @@ describe('planTileSources', () => {
     );
   });
 
+  it('has every source honour SCAMIN', () => {
+    const dir = fs.mkdtempSync(path.join(tmp, 'scamin-'));
+    writeFC(path.join(dir, 'SOUNDG__US5MA1SK.geojson'), [point({ SCAMIN: 90000 })]);
+    writeFC(path.join(dir, 'DEPARE__IENC_X.geojson'), [point({ DRVAL1: 2 })]);
+    const sources = planTileSources(dir, 9, 16);
+    assert.strictEqual(sources.length, 2);
+    assert.ok(sources.every((s) => s.scamin === true));
+  });
+
   it('gives each band of a layer its own zoom range', () => {
     const dir = fs.mkdtempSync(path.join(tmp, 'bands-'));
     writeFC(path.join(dir, 'DEPARE__US3CO100.geojson'), [point({ band: 3 })]);
