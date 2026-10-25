@@ -10,8 +10,10 @@ import {
   inspectLocalChartSource,
   isBsbChart,
   isS57Cell,
+  isS57Update,
   resolveLocalPath
 } from '../dist/utils/local-chart-source.js';
+import { gatherCellUpdates } from '../dist/utils/s57-export-files.js';
 import {
   getConversionProgress as getRncProgress,
   processRncLocal
@@ -111,6 +113,11 @@ describe('chart file tests', () => {
     assert.ok(isS57Cell('US5MA1AA.000'));
     assert.ok(!isS57Cell('US5MA1AA.001'));
     assert.ok(!isS57Cell('._US5MA1AA.000'));
+    assert.ok(isS57Update('US5MA1AA.001'));
+    assert.ok(isS57Update('us5ma1aa.012'));
+    assert.ok(!isS57Update('US5MA1AA.000'));
+    assert.ok(!isS57Update('._US5MA1AA.001'));
+    assert.ok(!isS57Update('README.TXT'));
     assert.ok(isBsbChart('13221_1.KAP'));
     assert.ok(isBsbChart('13221.bsb'));
     assert.ok(!isBsbChart('._13221_1.kap'));
@@ -201,7 +208,7 @@ describe('extractLocalChartSource', () => {
     const source = await inspectLocalChartSource(dir, isBsbChart, 'BSB charts');
     const workDir = path.join(TMP, 'extract-work');
     const archives: string[] = [];
-    const files = await extractLocalChartSource(source, isBsbChart, workDir, (zip) => {
+    const { files } = await extractLocalChartSource(source, isBsbChart, workDir, (zip) => {
       archives.push(zip);
     });
     assert.deepEqual(archives, [path.join(dir, 'b.zip')]);
@@ -211,6 +218,92 @@ describe('extractLocalChartSource', () => {
     ]);
     assert.ok(!fs.existsSync(path.join(workDir, 'escape.kap')));
     assert.deepEqual(snapshot(dir), before);
+  });
+});
+
+describe('S-57 updates kept apart from their cells', () => {
+  it('reads an update-only ZIP with the folder, and applies it to the loose cell', async () => {
+    const dir = path.join(TMP, 'updates-apart');
+    write(path.join(dir, 'ENC_ROOT', 'US5MA1AA', 'US5MA1AA.000'), 'base');
+    write(path.join(dir, 'ENC_ROOT', 'US5MA1AA', 'US5MA1AA.001'), 'beside');
+    write(
+      path.join(dir, 'updates.zip'),
+      storedZip([
+        { name: 'ENC_ROOT/US5MA1AA/US5MA1AA.001', data: Buffer.from('elsewhere') },
+        { name: 'ENC_ROOT/US5MA1AA/us5ma1aa.002', data: Buffer.from('second') }
+      ])
+    );
+    write(path.join(dir, 'loose-updates', 'US5MA2AA.001'), 'loose update');
+    write(
+      path.join(dir, 'cells.zip'),
+      storedZip([{ name: 'ENC_ROOT/US5MA2AA/US5MA2AA.000', data: Buffer.from('base2') }])
+    );
+    const before = snapshot(dir);
+
+    // Without the update test the update-only ZIP is not part of the source.
+    const plain = await inspectLocalChartSource(dir, isS57Cell, 'S-57 cells');
+    assert.deepEqual(plain.zips, [path.join(dir, 'cells.zip')]);
+
+    const source = await inspectLocalChartSource(dir, isS57Cell, 'S-57 cells', isS57Update);
+    assert.deepEqual(source.zips, [path.join(dir, 'cells.zip'), path.join(dir, 'updates.zip')]);
+    assert.deepEqual(source.looseCompanions, [
+      path.join(dir, 'ENC_ROOT', 'US5MA1AA', 'US5MA1AA.001'),
+      path.join(dir, 'loose-updates', 'US5MA2AA.001')
+    ]);
+
+    const workDir = path.join(TMP, 'updates-apart-work');
+    const found = await extractLocalChartSource(source, isS57Cell, workDir, undefined, isS57Update);
+    const { cells, withUpdates } = gatherCellUpdates(found.files, found.companions, workDir);
+    assert.deepEqual(withUpdates.sort(), ['US5MA1AA', 'US5MA2AA']);
+    assert.equal(cells.length, 2);
+    const contents = (cell: string): Record<string, string> =>
+      Object.fromEntries(
+        fs
+          .readdirSync(path.dirname(cell))
+          .sort()
+          .map((f) => [f, fs.readFileSync(path.join(path.dirname(cell), f), 'utf8')])
+      );
+    const first = cells.find((c) => path.basename(c) === 'US5MA1AA.000');
+    const second = cells.find((c) => path.basename(c) === 'US5MA2AA.000');
+    assert.ok(first && second);
+    // The update beside the cell wins over the same number elsewhere; others
+    // are named after the cell.
+    assert.deepEqual(contents(first), {
+      'US5MA1AA.000': 'base',
+      'US5MA1AA.001': 'beside',
+      'US5MA1AA.002': 'second'
+    });
+    assert.deepEqual(contents(second), {
+      'US5MA2AA.000': 'base2',
+      'US5MA2AA.001': 'loose update'
+    });
+    assert.deepEqual(snapshot(dir), before, 'the source is only read');
+  });
+
+  it('leaves a cell whose updates all sit beside it where it is', () => {
+    const dir = path.join(TMP, 'updates-beside');
+    const cell = path.join(dir, 'US5MA3AA.000');
+    write(cell);
+    write(path.join(dir, 'US5MA3AA.001'));
+    const { cells, withUpdates } = gatherCellUpdates(
+      [cell],
+      [path.join(dir, 'US5MA3AA.001')],
+      path.join(TMP, 'updates-beside-work')
+    );
+    assert.deepEqual(cells, [cell]);
+    assert.deepEqual(withUpdates, []);
+  });
+
+  it('still needs a cell: updates alone are nothing to convert', async () => {
+    const dir = path.join(TMP, 'updates-only');
+    write(
+      path.join(dir, 'updates.zip'),
+      storedZip([{ name: 'US5MA1AA/US5MA1AA.001', data: Buffer.from('u') }])
+    );
+    await assert.rejects(
+      inspectLocalChartSource(dir, isS57Cell, 'S-57 cells', isS57Update),
+      LocalSourceError
+    );
   });
 });
 

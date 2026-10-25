@@ -25,7 +25,12 @@ import {
 } from './conversion-backend.js';
 import { MAX_CONVERSION_LOG_LINES } from './conversion-log.js';
 import { setConversionResult } from './conversion-progress.js';
-import { extractLocalChartSource, isS57Cell, type LocalChartSource } from './local-chart-source.js';
+import {
+  extractLocalChartSource,
+  isS57Cell,
+  isS57Update,
+  type LocalChartSource
+} from './local-chart-source.js';
 import { patchS57Mbtiles, setMbtilesDisplayName } from './mbtiles-metadata.js';
 import { addRasterOverviews } from './raster-pyramid.js';
 import { BAND_MAX_ZOOM, BAND_MIN_ZOOM, detectEncBand, exportFileParts } from './s57-band.js';
@@ -39,6 +44,7 @@ import {
   EXPORT_ERROR_FILE_BASENAME,
   SKIP_LAYERS,
   exportErrorReport,
+  gatherCellUpdates,
   geojsonContentSize
 } from './s57-export-files.js';
 import { extractTarArchive } from './tar-extract.js';
@@ -835,11 +841,25 @@ export async function processS57Local(
   };
   let cells: string[];
   try {
-    cells = await extractLocalChartSource(source, isS57Cell, workDir, (zip, index, count) => {
-      const message = `Extracting ${path.basename(zip)} (${String(index)}/${String(count)})...`;
-      onStatus?.('extracting', message);
-      setProgress(chartNumber, 'extracting', message);
-    });
+    const found = await extractLocalChartSource(
+      source,
+      isS57Cell,
+      workDir,
+      (zip, index, count) => {
+        const message = `Extracting ${path.basename(zip)} (${String(index)}/${String(count)})...`;
+        onStatus?.('extracting', message);
+        setProgress(chartNumber, 'extracting', message);
+      },
+      isS57Update
+    );
+    const gathered = gatherCellUpdates(found.files, found.companions, workDir);
+    cells = gathered.cells;
+    if (gathered.withUpdates.length > 0) {
+      appendLog(
+        chartNumber,
+        `Applying updates kept apart from their cells to ${gathered.withUpdates.join(', ')}`
+      );
+    }
   } catch (err) {
     setConversionFailed(
       chartNumber,

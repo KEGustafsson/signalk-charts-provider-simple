@@ -89,7 +89,10 @@ export function forEachLine(
 ): void {
   const fd = fs.openSync(file, 'r');
   try {
-    const chunk = Buffer.alloc(chunkBytes);
+    // Sized to the file: most shard parts are small, and each read fills
+    // the buffer before any of it is used, so it needs no zeroing.
+    const size = fs.fstatSync(fd).size;
+    const chunk = Buffer.allocUnsafe(Math.max(1, Math.min(chunkBytes, size)));
     // The partial last line of a read, kept as bytes: the read boundary may
     // fall inside a multi-byte character, so only whole lines are decoded.
     let carry: Buffer = Buffer.alloc(0);

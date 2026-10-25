@@ -170,7 +170,8 @@ import {
   LocalSourceError,
   inspectLocalChartSource,
   isBsbChart,
-  isS57Cell
+  isS57Cell,
+  isS57Update
 } from './utils/local-chart-source.js';
 import {
   cachedGeojsonFor,
@@ -4058,7 +4059,8 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
           source = await inspectLocalChartSource(
             body.path,
             isS57 ? isS57Cell : isBsbChart,
-            isS57 ? 'S-57 ENC cells (.000)' : 'BSB charts (.kap)'
+            isS57 ? 'S-57 ENC cells (.000)' : 'BSB charts (.kap)',
+            isS57 ? isS57Update : undefined
           );
         } catch (err) {
           if (err instanceof LocalSourceError) {

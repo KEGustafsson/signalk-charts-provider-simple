@@ -22,6 +22,13 @@ const notAppleDouble = (name: string): boolean => !path.basename(name).startsWit
 export const isS57Cell: ChartFileTest = (name) =>
   name.toLowerCase().endsWith('.000') && notAppleDouble(name);
 
+/**
+ * An S-57 update file (`.001`, `.002`, …). A source can hold updates apart
+ * from their base cell, in another folder or ZIP file.
+ */
+export const isS57Update: ChartFileTest = (name) =>
+  /\.\d{3}$/.test(name) && !name.endsWith('.000') && notAppleDouble(name);
+
 /** A BSB raster chart. */
 export const isBsbChart: ChartFileTest = (name) =>
   ['.kap', '.bsb'].includes(path.extname(name).toLowerCase()) && notAppleDouble(name);
@@ -47,7 +54,9 @@ export interface LocalChartSource {
   name: string;
   /** Chart files outside any archive. */
   looseFiles: string[];
-  /** Archives that hold at least one chart file. */
+  /** Companion files (S-57 updates) outside any archive. */
+  looseCompanions: string[];
+  /** Archives that hold at least one chart file or companion file. */
   zips: string[];
   /** Archives that could not be read, with the reason. */
   unreadableZips: string[];
@@ -71,9 +80,18 @@ export function resolveLocalPath(input: string): string {
   return path.resolve(expanded);
 }
 
-async function zipHoldsChart(zipPath: string, isChartFile: ChartFileTest): Promise<boolean> {
+/** What an archive holds that a conversion reads: chart files, only companions, or neither. */
+async function zipContents(
+  zipPath: string,
+  isChartFile: ChartFileTest,
+  isCompanion: ChartFileTest | undefined
+): Promise<'charts' | 'companions' | null> {
   const directory = await unzipper.Open.file(zipPath);
-  return directory.files.some((f) => f.type === 'File' && isChartFile(f.path));
+  const files = directory.files.filter((f) => f.type === 'File');
+  if (files.some((f) => isChartFile(f.path))) {
+    return 'charts';
+  }
+  return isCompanion && files.some((f) => isCompanion(f.path)) ? 'companions' : null;
 }
 
 /**
@@ -86,7 +104,10 @@ async function zipHoldsChart(zipPath: string, isChartFile: ChartFileTest): Promi
 export async function inspectLocalChartSource(
   input: string,
   isChartFile: ChartFileTest,
-  kind: string
+  kind: string,
+  // Files read with the charts though not charts themselves (S-57 updates);
+  // archives holding only these are kept too.
+  isCompanion?: ChartFileTest
 ): Promise<LocalChartSource> {
   const root = resolveLocalPath(input);
   let stat: fs.Stats;
@@ -97,6 +118,7 @@ export async function inspectLocalChartSource(
   }
 
   const looseFiles: string[] = [];
+  const looseCompanions: string[] = [];
   const candidateZips: string[] = [];
   if (stat.isFile()) {
     if (!root.toLowerCase().endsWith('.zip')) {
@@ -133,6 +155,8 @@ export async function inspectLocalChartSource(
         } else if (entry.isFile()) {
           if (isChartFile(entry.name)) {
             looseFiles.push(full);
+          } else if (isCompanion?.(entry.name)) {
+            looseCompanions.push(full);
           } else if (entry.name.toLowerCase().endsWith('.zip') && notAppleDouble(entry.name)) {
             candidateZips.push(full);
           }
@@ -146,23 +170,35 @@ export async function inspectLocalChartSource(
 
   const zips: string[] = [];
   const unreadableZips: string[] = [];
+  let chartZips = 0;
   for (const zip of candidateZips) {
     try {
-      if (await zipHoldsChart(zip, isChartFile)) {
+      const contents = await zipContents(zip, isChartFile, isCompanion);
+      if (contents !== null) {
         zips.push(zip);
+      }
+      if (contents === 'charts') {
+        chartZips++;
       }
     } catch (err) {
       unreadableZips.push(`${zip}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  if (looseFiles.length === 0 && zips.length === 0) {
+  if (looseFiles.length === 0 && chartZips === 0) {
     const what = stat.isFile() ? 'This ZIP file' : 'This folder';
     throw new LocalSourceError(`${what} holds no ${kind}, loose or in ZIP files: ${root}`);
   }
 
   const name = path.basename(root).replace(/\.zip$/i, '') || 'charts';
-  return { root, name, looseFiles: looseFiles.sort(), zips: zips.sort(), unreadableZips };
+  return {
+    root,
+    name,
+    looseFiles: looseFiles.sort(),
+    looseCompanions: looseCompanions.sort(),
+    zips: zips.sort(),
+    unreadableZips
+  };
 }
 
 /**
@@ -198,22 +234,28 @@ async function findChartFiles(dir: string, isChartFile: ChartFileTest): Promise<
 
 /**
  * Extract each of `source`'s archives into its own folder under `workDir`
- * and return every chart file a conversion reads: the loose ones, where they
- * lie, then those from the archives.
+ * and return every chart file a conversion reads (the loose ones, where they
+ * lie, then those from the archives) and, with `isCompanion`, every
+ * companion file the same way.
  */
 export async function extractLocalChartSource(
   source: LocalChartSource,
   isChartFile: ChartFileTest,
   workDir: string,
-  onArchive?: (zip: string, index: number, count: number) => void
-): Promise<string[]> {
+  onArchive?: (zip: string, index: number, count: number) => void,
+  isCompanion?: ChartFileTest
+): Promise<{ files: string[]; companions: string[] }> {
   const files = [...source.looseFiles];
+  const companions = isCompanion ? [...source.looseCompanions] : [];
   for (const [index, zip] of source.zips.entries()) {
     onArchive?.(zip, index + 1, source.zips.length);
     const dest = path.join(workDir, `archive-${String(index + 1)}`);
     fs.mkdirSync(dest, { recursive: true });
     await extractZipSafely(zip, dest);
     files.push(...(await findChartFiles(dest, isChartFile)));
+    if (isCompanion) {
+      companions.push(...(await findChartFiles(dest, isCompanion)));
+    }
   }
-  return files;
+  return { files, companions };
 }

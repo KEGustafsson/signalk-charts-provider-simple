@@ -364,47 +364,50 @@ function consolidateGeoJSONByLayer(
   for (const [layer, sources] of layerGroups) {
     const out = path.join(mergedDir, `${layer}.geojson`);
     const handle = fs.openSync(out, 'w');
-    fs.writeSync(handle, '{"type":"FeatureCollection","features":[\n');
-    let first = true;
-    for (const source of sources) {
-      // Per-source-chart band → per-feature minzoom. Files in this source
-      // share a band because they all come from the same chart cell, so the
-      // band lookup is one-shot per source file.
-      const band = highestBandForFiles([source]);
-      const bandFloor = band !== null ? BAND_MIN_ZOOM[band] : null;
-      const featureMinzoom = bandFloor !== null ? Math.max(userMinzoom, bandFloor) : null;
+    try {
+      fs.writeSync(handle, '{"type":"FeatureCollection","features":[\n');
+      let first = true;
+      for (const source of sources) {
+        // Per-source-chart band → per-feature minzoom. Files in this source
+        // share a band because they all come from the same chart cell, so the
+        // band lookup is one-shot per source file.
+        const band = highestBandForFiles([source]);
+        const bandFloor = band !== null ? BAND_MIN_ZOOM[band] : null;
+        const featureMinzoom = bandFloor !== null ? Math.max(userMinzoom, bandFloor) : null;
 
-      let parsed: { features?: unknown[] };
-      try {
-        parsed = JSON.parse(readSource(source)) as {
-          features?: unknown[];
-        };
-      } catch {
-        continue;
-      }
-      const features = parsed.features ?? [];
-      for (const feat of features) {
-        if (!first) {
-          fs.writeSync(handle, ',\n');
+        let parsed: { features?: unknown[] };
+        try {
+          parsed = JSON.parse(readSource(source)) as {
+            features?: unknown[];
+          };
+        } catch {
+          continue;
         }
-        const flattened = flattenListProperties(feat);
-        const scaminZoom = scaminMinzoom(flattened);
-        const minzoomCandidates = [featureMinzoom, scaminZoom].filter(
-          (z): z is number => z !== null
-        );
-        const stamped =
-          minzoomCandidates.length > 0
-            ? withTippecanoeMinzoom(
-                flattened,
-                Math.min(maxzoom, Math.max(userMinzoom, ...minzoomCandidates))
-              )
-            : flattened;
-        fs.writeSync(handle, JSON.stringify(stamped));
-        first = false;
+        const features = parsed.features ?? [];
+        for (const feat of features) {
+          if (!first) {
+            fs.writeSync(handle, ',\n');
+          }
+          const flattened = flattenListProperties(feat);
+          const scaminZoom = scaminMinzoom(flattened);
+          const minzoomCandidates = [featureMinzoom, scaminZoom].filter(
+            (z): z is number => z !== null
+          );
+          const stamped =
+            minzoomCandidates.length > 0
+              ? withTippecanoeMinzoom(
+                  flattened,
+                  Math.min(maxzoom, Math.max(userMinzoom, ...minzoomCandidates))
+                )
+              : flattened;
+          fs.writeSync(handle, JSON.stringify(stamped));
+          first = false;
+        }
       }
+      fs.writeSync(handle, '\n]}\n');
+    } finally {
+      fs.closeSync(handle);
     }
-    fs.writeSync(handle, '\n]}\n');
-    fs.closeSync(handle);
     consolidated.push({ file: out, sourceFiles: sources });
   }
 

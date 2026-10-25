@@ -115,3 +115,56 @@ export function cellFiles(cell: string): string[] {
   }
   return files;
 }
+
+/**
+ * Give each cell the update files found apart from it: GDAL applies only
+ * the updates beside a cell, but a source can keep a base cell and its
+ * updates in different folders or archives. A cell with updates elsewhere
+ * is linked (or, across file systems, copied) into its own folder under
+ * `workDir` together with its own files and those updates, named after the
+ * cell; an update already beside the cell wins over one of the same number
+ * elsewhere. Returns the cells to read, in the same order, and the names of
+ * the cells that were given updates.
+ */
+export function gatherCellUpdates(
+  cells: readonly string[],
+  updates: readonly string[],
+  workDir: string
+): { cells: string[]; withUpdates: string[] } {
+  const byStem = new Map<string, string[]>();
+  for (const update of updates) {
+    const stem = path.basename(update, path.extname(update)).toUpperCase();
+    const list = byStem.get(stem) ?? [];
+    list.push(update);
+    byStem.set(stem, list);
+  }
+  const withUpdates: string[] = [];
+  const result = cells.map((cell, index) => {
+    const dir = path.dirname(cell);
+    const stem = path.basename(cell, path.extname(cell));
+    const elsewhere = (byStem.get(stem.toUpperCase()) ?? []).filter((u) => path.dirname(u) !== dir);
+    if (elsewhere.length === 0) {
+      return cell;
+    }
+    const dest = path.join(workDir, 'cell-updates', String(index));
+    fs.mkdirSync(dest, { recursive: true });
+    const placed = new Set<string>();
+    // The cell's own files first, then the updates found elsewhere, each
+    // under the cell's own name so GDAL finds it.
+    for (const file of [...cellFiles(cell), ...elsewhere.sort()]) {
+      const name = `${stem}${path.extname(file)}`;
+      if (placed.has(name.toUpperCase())) {
+        continue;
+      }
+      placed.add(name.toUpperCase());
+      try {
+        fs.linkSync(file, path.join(dest, name));
+      } catch {
+        fs.copyFileSync(file, path.join(dest, name));
+      }
+    }
+    withUpdates.push(stem);
+    return path.join(dest, `${stem}${path.extname(cell)}`);
+  });
+  return { cells: result, withUpdates };
+}

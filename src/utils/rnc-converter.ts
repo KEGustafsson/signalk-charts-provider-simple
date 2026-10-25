@@ -179,11 +179,16 @@ export async function processRncLocal(
   try {
     let kapFiles: string[];
     try {
-      kapFiles = await extractLocalChartSource(source, isBsbChart, workDir, (zip, index, count) => {
-        const message = `Extracting ${path.basename(zip)} (${String(index)}/${String(count)})...`;
-        statusFn('extracting', message);
-        setConvertProgress(chartNumber, 'extracting', message);
-      });
+      ({ files: kapFiles } = await extractLocalChartSource(
+        source,
+        isBsbChart,
+        workDir,
+        (zip, index, count) => {
+          const message = `Extracting ${path.basename(zip)} (${String(index)}/${String(count)})...`;
+          statusFn('extracting', message);
+          setConvertProgress(chartNumber, 'extracting', message);
+        }
+      ));
     } catch (err) {
       throw new Error(
         `Extracting the ZIP files failed: ${err instanceof Error ? err.message : String(err)}`,

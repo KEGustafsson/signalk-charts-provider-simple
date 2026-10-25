@@ -21,9 +21,10 @@ before it writes anything, so a fallback never meets a half-finished container
 run. The container toolchain is used when all of these hold:
 
 1. `signalk-container` published its manager and detected a Docker or Podman
-   runtime. A conversion requested while the startup discovery (up to 30 s)
-   still runs waits for it; a manager published after the discovery gave up
-   is taken up once its runtime is detected.
+   runtime. A conversion requested while the startup discovery still runs
+   waits for it, rather than falling back only because the plugins started
+   in a different order; a manager published after the discovery gave up is
+   taken up once its runtime is detected (`container-manager.ts`).
 2. The `charts-toolbox` image is present, or could be pulled now. A boat
    offline without the image converts with WebAssembly instead of failing.
 3. Every folder the conversion mounts resolves to a mount source for the
@@ -45,8 +46,8 @@ What differs between the two:
 |---|---|---|
 | S-57 tiling | One tippecanoe per IHO band, then tile-join (`join` progress stage, `joining` chart-set phase); a single-band bundle runs one tippecanoe with its maxzoom clamped to the band's | Every band in one pass of the built-in tiler |
 | Raster overviews | `gdaladdo -r average` | Averaged from the tiles below (`raster-pyramid.ts`) |
-| CPU budget | `tippecanoeThreadsPerJob`, `gdalExportParallelism`, enforced as the job's CPU cap | `workersPerJob` worker threads |
-| Cancel | Kills the job (signalk-container >= 1.16.0), else stops at the next band | Terminates the worker threads |
+| CPU budget | Tippecanoe threads and parallel exports, also enforced as the job's CPU cap | Worker threads (both from `concurrency.ts`) |
+| Cancel | Kills the job where signalk-container supports it, else stops at the next band | Terminates the worker threads |
 
 Both share the rest: archive extraction in JavaScript (ZIP, `.tar`,
 `.tar.gz`, `.tar.xz`), one cell of each name (`uniqueCells`), output naming,
@@ -108,7 +109,7 @@ draws over the harbour plan at high zoom.
 GDAL exports each cell's layers to `<LAYER>__<cell>.geojson`, one cell per
 worker at a time. The export then becomes the tiler's sources, one per layer
 and band, each shown at that band's zooms within the user's range
-(`planTileSources`, `BAND_MIN_ZOOM` / `BAND_MAX_ZOOM` in `s57-band.ts`). The
+(`planTileSources`, with each band's zooms in `s57-band.ts`). The
 tiler builds the whole bundle in one pass, with no per-band runs to join.
 
 Within its band's zooms, a feature with an S-57 `SCAMIN` starts only at the
@@ -154,8 +155,8 @@ Two details make the shards cheap:
 - **Re-rooting.** geojson-vt starts every index at the world tile, so a z12
   shard would clip and transform its features through twelve levels before
   reaching its own tile. Each shard instead rescales its coordinates so that
-  its tile becomes a tile at a fixed shallow zoom (`ROOT_Z` in
-  `vector-tile-shard.ts`). Scaling by a power of two keeps every tile
+  its tile becomes a tile at a fixed shallow zoom (`vector-tile-shard.ts`).
+  Scaling by a power of two keeps every tile
   boundary, so the tiles are the same, after a few levels of work instead of
   twelve.
 - **Exact pre-clipping.** Before re-rooting, each feature is clipped to the
@@ -164,8 +165,8 @@ Two details make the shards cheap:
   geojson-vt would clamp latitudes or wrap copies across the antimeridian.
 
 Geometry is kept as it is: no simplification, no dropped small polygons, no
-feature or tile size limits, and a generous tile buffer (`TILE_BUFFER` in
-`vector-tiler.ts`), so that harbour basins and narrow channels survive. List
+feature or tile size limits, and a generous tile buffer (`vector-tiler.ts`),
+so that harbour basins and narrow channels survive. List
 attributes (`COLOUR`, `CATLIT`, …) are joined with commas and null attributes
 dropped. The MBTiles `json` metadata lists every layer with its zoom range and
 attribute types.
@@ -173,10 +174,10 @@ attribute types.
 ### Raster charts and basemaps
 
 GDAL's translate API, called in the workers, tiles a BSB/KAP chart into a PNG
-MBTiles at its native zoom. Overview zooms are then added below it
-(`OVERVIEW_LEVELS` in `rnc-converter.ts`). A basemap shapefile is rasterized
-to a world GeoTIFF, tiled the same way, and given overview zooms of its own
-(`BASEMAP_OVERVIEW_LEVELS` in `s57-converter.ts`). Each overview tile is
+MBTiles at its native zoom. Overview zooms are then added below it, as many
+as the container toolchain adds (`rnc-converter.ts`). A basemap shapefile is
+rasterized to a world GeoTIFF, tiled the same way, and given overview zooms
+of its own (`s57-converter.ts`). Each overview tile is
 averaged, in the workers, from the tiles below it; a quarter with no tile
 below it stays transparent.
 
@@ -189,9 +190,14 @@ or of one ZIP file; `~` is the server's home folder. A folder is searched
 recursively for S-57 cells (`.000`) or BSB charts (`.kap`, `.bsb`), loose or
 inside ZIP files, without following links or entering hidden folders. A ZIP is
 looked into without extracting it and used only if it holds a chart file; one
-that cannot be read is skipped and reported. A path that holds
-more than `MAX_SCAN_ENTRIES` entries, such as a disk's root, is refused once
-the search reaches that many, instead of being searched in full.
+that cannot be read is skipped and reported. A path that holds far more
+entries than any chart folder, such as a disk's root, is refused once the
+search reaches that limit (`local-chart-source.ts`), instead of being
+searched in full. S-57 update files (`.001`, …) are read with the cells
+wherever they lie: an archive holding only updates is extracted too, and a
+cell whose updates sit in another folder or archive is linked together with
+them into the work folder, since GDAL applies only the updates beside a
+cell.
 
 The source is only read. Loose charts are converted where they lie (the
 container toolchain stages S-57 cells into its scratch folder first, see
