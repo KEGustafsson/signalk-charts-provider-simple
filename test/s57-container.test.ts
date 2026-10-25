@@ -968,4 +968,31 @@ describe('stageCells (the cells a container export sees)', () => {
       'lower-case update'
     );
   });
+
+  it('keeps the update named like the cell when another differs only in case', (t) => {
+    const dir = path.join(tmp, 'both-cases');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'us5ma4sk.001'), 'lower-case update');
+    if (fs.existsSync(path.join(dir, 'US5MA4SK.001'))) {
+      t.skip('the file system ignores case');
+      return;
+    }
+    fs.writeFileSync(path.join(dir, 'US5MA4SK.000'), 'base');
+    fs.writeFileSync(path.join(dir, 'US5MA4SK.001'), 'exact update');
+    fs.writeFileSync(path.join(dir, 'us5ma4sk.002'), 'second');
+    fs.writeFileSync(path.join(dir, 'Us5Ma4Sk.002'), 'second, other case');
+    const dest = path.join(tmp, 'staged-both');
+    stageCells([path.join(dir, 'US5MA4SK.000')], dest);
+    assert.deepStrictEqual(fs.readdirSync(dest).sort(), [
+      'US5MA4SK.000',
+      'US5MA4SK.001',
+      'US5MA4SK.002'
+    ]);
+    assert.strictEqual(fs.readFileSync(path.join(dest, 'US5MA4SK.001'), 'utf8'), 'exact update');
+    // Neither is named like the cell: the first in sorted order.
+    assert.strictEqual(
+      fs.readFileSync(path.join(dest, 'US5MA4SK.002'), 'utf8'),
+      'second, other case'
+    );
+  });
 });

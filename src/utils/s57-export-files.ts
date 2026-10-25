@@ -92,30 +92,36 @@ const UPDATE_EXTENSION = /^\.\d{3}$/;
  * The files GDAL reads for a cell: its `.000` and the update files beside it
  * (`.001`, `.002`, …), which the S-57 driver applies when it opens the cell.
  * An update's name is matched without regard to case, as producers differ;
- * whoever places these for GDAL names each after the cell.
+ * whoever places these for GDAL names each after the cell. When two files
+ * hold the same update in different case, the one named exactly like the
+ * cell is kept, else the first in sorted order.
  */
 export function cellFiles(cell: string): string[] {
   const dir = path.dirname(cell);
-  const stem = path.basename(cell, path.extname(cell)).toUpperCase();
-  const files = [cell];
+  const stem = path.basename(cell, path.extname(cell));
   let names: string[];
   try {
     names = fs.readdirSync(dir);
   } catch {
-    return files;
+    return [cell];
   }
+  const exactFirst = (name: string): number =>
+    path.basename(name, path.extname(name)) === stem ? 0 : 1;
+  names.sort((a, b) => exactFirst(a) - exactFirst(b) || (a < b ? -1 : a > b ? 1 : 0));
+  const updates = new Map<string, string>();
   for (const name of names) {
     const ext = path.extname(name);
     if (
-      path.basename(name, ext).toUpperCase() === stem &&
+      !updates.has(ext) &&
+      path.basename(name, ext).toUpperCase() === stem.toUpperCase() &&
       UPDATE_EXTENSION.test(ext) &&
       ext !== '.000' &&
       fs.statSync(path.join(dir, name)).isFile()
     ) {
-      files.push(path.join(dir, name));
+      updates.set(ext, path.join(dir, name));
     }
   }
-  return files;
+  return [cell, ...updates.values()];
 }
 
 /**
