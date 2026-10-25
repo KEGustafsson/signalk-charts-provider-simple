@@ -311,8 +311,6 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
   // Off between stop() and the next start, so a late refresh (a finished
   // download, say) can't restart polling for a stopped plugin.
   let onlineTimeActive = false;
-  // The startup chart-directory sweep, pending until SWEEP_DELAY_MS after
-  // the charts load; cleared by stop().
   let sweepTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** A client read these charts: keep their timelines fresh while it does. */
@@ -1057,6 +1055,10 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     const started = lifecycle;
     let scanned: ChartProvider[] = [];
     try {
+      // Listed before the charts are validated: a chart promoted into the
+      // folder after this listing is never a candidate, so the sweep cannot
+      // delete a chart that a finishing upload or conversion just placed.
+      const allFiles = await scanChartsRecursively(chartPath);
       const charts = await findCharts(chartPath, resolveOnlineChart, getLandIndex() !== null);
       scanned = Object.values(charts);
       const validPaths = new Set(scanned.map((c) => c._filePath).filter(Boolean));
@@ -1066,7 +1068,6 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
       if (lifecycle !== started) {
         return;
       }
-      const allFiles = await scanChartsRecursively(chartPath);
       // Repairable charts (valid tiles, missing metadata.bounds) are
       // deliberately excluded from findCharts(), so they'd otherwise be
       // unlinked here as "invalid" — destroying the very files the repair
