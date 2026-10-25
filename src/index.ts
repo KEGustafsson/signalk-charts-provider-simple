@@ -16,7 +16,9 @@ import {
   getCatalogStatus,
   getCatalogsWithInstalledCharts,
   getConvertingCharts,
-  getConvertingCount,
+  getConversionSlotsInUse,
+  releasePendingConversion,
+  reservePendingConversion,
   getInstalledCatalogCharts,
   getOnlineCatalogChart,
   getOnlineCatalogCharts,
@@ -232,6 +234,15 @@ const SWEEP_DELAY_MS = 30_000;
 // rendering for non-admin sessions (issue #99). The v1 api namespace is
 // only http_authorize-gated, so any authenticated user can read tiles.
 const chartTilesPath = `/signalk/v1/api/resources/charts`;
+
+// A download's conversion slot is released when the download ends. One that
+// completed has started converting by then: its listener marks the chart
+// converting before its first await, within this same event.
+for (const event of ['job-completed', 'job-failed', 'job-cancelled'] as const) {
+  downloadManager.on(event, (job: DownloadJob) => {
+    releasePendingConversion(job.id);
+  });
+}
 
 const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
   let chartProviders: Record<string, ChartProvider> = {};
@@ -3741,7 +3752,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         const validatedFile = uploadedFile;
         void (async () => {
           const budgetMax = getCpuBudget().maxConcurrentConversions;
-          if (getConvertingCount() >= budgetMax) {
+          if (getConversionSlotsInUse() >= budgetMax) {
             cleanupDir(tmpDir);
             res.status(429).json({
               success: false,
@@ -3910,7 +3921,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         ].includes(classification.format);
 
         const budgetMax = getCpuBudget().maxConcurrentConversions;
-        if (needsConversion && getConvertingCount() >= budgetMax) {
+        if (needsConversion && getConversionSlotsInUse() >= budgetMax) {
           res.status(429).json({
             success: false,
             error: `Too many conversions running (max ${budgetMax}). Please wait for a conversion to finish.`
@@ -4237,7 +4248,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         return;
       }
       const budgetMax = getCpuBudget().maxConcurrentConversions;
-      if (getConvertingCount() >= budgetMax) {
+      if (getConversionSlotsInUse() >= budgetMax) {
         res.status(429).json({
           success: false,
           error: `Too many conversions running (max ${budgetMax}). Please wait for one to finish.`
@@ -4334,6 +4345,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     fs.mkdirSync(tmpDownloadDir, { recursive: true });
 
     const jobId = downloadManager.createJob(url, tmpDownloadDir, chartNumber, { saveRaw: true });
+    reservePendingConversion(jobId);
 
     trackInstall(chartNumber, catalogFile, zipfileDatetime ?? '', url);
     // Don't flag converting yet — the download still has to finish.
@@ -4456,6 +4468,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     fs.mkdirSync(tmpDownloadDir, { recursive: true });
 
     const jobId = downloadManager.createJob(url, tmpDownloadDir, chartNumber, { saveRaw: true });
+    reservePendingConversion(jobId);
 
     trackInstall(chartNumber, catalogFile, zipfileDatetime ?? '', url);
     // Set converting state inside the listener once the download has
@@ -4570,6 +4583,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     fs.mkdirSync(tmpDownloadDir, { recursive: true });
 
     const jobId = downloadManager.createJob(url, tmpDownloadDir, chartNumber, { saveRaw: true });
+    reservePendingConversion(jobId);
 
     trackInstall(chartNumber, catalogFile, zipfileDatetime ?? '', url);
     // Set converting state inside the listener once the download has
@@ -4671,6 +4685,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     fs.mkdirSync(tmpDownloadDir, { recursive: true });
 
     const jobId = downloadManager.createJob(url, tmpDownloadDir, chartNumber, { saveRaw: true });
+    reservePendingConversion(jobId);
 
     trackInstall(chartNumber, catalogFile, zipfileDatetime ?? '', url);
     // Set converting state inside the listener once the download has
@@ -4946,7 +4961,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
           return;
         }
         const convertBudgetMax = getCpuBudget().maxConcurrentConversions;
-        if (getConvertingCount() >= convertBudgetMax) {
+        if (getConversionSlotsInUse() >= convertBudgetMax) {
           throw new Error(
             `Too many conversions running (max ${convertBudgetMax}). Please retry when one finishes.`
           );
