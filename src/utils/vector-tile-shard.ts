@@ -23,12 +23,29 @@ import { VectorTile } from '@mapbox/vector-tile';
 import GeoJSONVT from 'geojson-vt';
 import { PbfReader } from 'pbf';
 import { fromGeojsonVt, fromVectorTileJs } from 'vt-pbf';
+import { scaminMinzoom } from './s57-scamin.js';
 
 export interface ShardGroup {
   /** Output layer name; several groups may share one. */
   layer: string;
   minzoom: number;
   maxzoom: number;
+  /** Leave each feature out of tiles below its S-57 SCAMIN zoom (s57-scamin.ts). */
+  scamin?: boolean;
+}
+
+/**
+ * The tag a feature carries, between bucketing and tiling, when it shows
+ * from a higher zoom than its group's minzoom. Not a valid S-57 attribute
+ * name, and removed before a tile is encoded.
+ */
+const FEATURE_MINZOOM_TAG = '\u0000minzoom';
+
+/** The feature's tags without the minzoom tag. */
+function withoutMinzoomTag(tags: Record<string, unknown>): Record<string, unknown> {
+  const rest = { ...tags };
+  delete rest[FEATURE_MINZOOM_TAG];
+  return rest;
 }
 
 export interface ShardTask {
@@ -408,11 +425,24 @@ export function tileShard(task: ShardTask, emit: (tiles: EncodedTile[]) => void)
       }
       next.push(g);
       if (z >= g.minzoom) {
-        const entry = (layers[g.layer] ??= { features: [] });
+        const shown: VtTile['features'] = [];
         for (const f of tile.features) {
-          entry.features.push(f);
+          const tags = f.tags;
+          const featureMinzoom = tags?.[FEATURE_MINZOOM_TAG];
+          if (typeof featureMinzoom !== 'number') {
+            shown.push(f);
+          } else if (featureMinzoom <= z && tags) {
+            // The tile cache shares tags between tiles: copy, never mutate.
+            shown.push({ ...f, tags: withoutMinzoomTag(tags) });
+          }
         }
-        hasLayer = true;
+        if (shown.length > 0) {
+          const entry = (layers[g.layer] ??= { features: [] });
+          for (const f of shown) {
+            entry.features.push(f);
+          }
+          hasLayer = true;
+        }
       }
     }
     if (hasLayer) {
@@ -671,10 +701,18 @@ export function bucketFeatures(task: BucketTask): BucketResult {
       bounds[3] = Math.max(bounds[3], box[3]);
       features++;
 
+      // A feature whose SCAMIN zoom lies above the group's minzoom shows from
+      // that zoom, capped at the group's maxzoom so clients overzooming the
+      // deepest tiles still draw it.
+      const scaminZoom = meta.scamin ? scaminMinzoom(feature) : null;
+      const tileProps =
+        scaminZoom !== null && scaminZoom > z
+          ? { ...properties, [FEATURE_MINZOOM_TAG]: Math.min(meta.maxzoom, scaminZoom) }
+          : properties;
       const line = `${String(group)}\t${JSON.stringify({
         type: 'Feature',
         ...(feature.id !== undefined ? { id: feature.id } : {}),
-        properties,
+        properties: tileProps,
         geometry: feature.geometry
       })}\n`;
       const x0 = Math.max(0, Math.floor((mercX(box[0]) - margin / n) * n));

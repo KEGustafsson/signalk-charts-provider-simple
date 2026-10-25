@@ -56,6 +56,11 @@ and band, each shown at that band's zooms within the user's range
 (`planTileSources`, `BAND_MIN_ZOOM` / `BAND_MAX_ZOOM` in `s57-band.ts`). The
 tiler builds the whole bundle in one pass, with no per-band runs to join.
 
+Within its band's zooms, a feature with a SCAMIN attribute shows only from
+the zoom whose scale reaches 1:SCAMIN (`s57-scamin.ts`), since S-52 hides it
+at smaller scales, capped at the band's maxzoom so overzoomed tiles still
+draw it. This keeps soundings and other detail out of the overview tiles.
+
 Two copies of a cell, such as a folder of cells beside the ZIP it came from,
 would write the same GeoJSON files, so only the first copy found is
 converted and the others are logged as skipped.

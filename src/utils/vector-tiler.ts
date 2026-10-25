@@ -38,6 +38,11 @@ export interface TileSource {
   layer: string;
   minzoom: number;
   maxzoom: number;
+  /**
+   * Show each feature only from the zoom its S-57 SCAMIN attribute is
+   * reached at (within `minzoom`–`maxzoom`), as S-52 hides it below that.
+   */
+  scamin?: boolean;
   /** GeoJSON files (`.geojson`, or gzipped `.geojson.gz`). */
   files: string[];
 }
@@ -105,11 +110,17 @@ export function groupSources(sources: readonly TileSource[]): {
     if (source.minzoom > source.maxzoom || source.files.length === 0) {
       continue;
     }
-    const key = `${source.layer}\u0000${String(source.minzoom)}\u0000${String(source.maxzoom)}`;
+    const scamin = source.scamin === true;
+    const key = `${source.layer}\u0000${String(source.minzoom)}\u0000${String(source.maxzoom)}\u0000${String(scamin)}`;
     let group = byKey.get(key);
     if (group === undefined) {
       group = groups.length;
-      groups.push({ layer: source.layer, minzoom: source.minzoom, maxzoom: source.maxzoom });
+      groups.push({
+        layer: source.layer,
+        minzoom: source.minzoom,
+        maxzoom: source.maxzoom,
+        ...(scamin ? { scamin } : {})
+      });
       byKey.set(key, group);
     }
     for (const file of source.files) {

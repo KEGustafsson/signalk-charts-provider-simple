@@ -238,6 +238,94 @@ describe('buildVectorMbtiles', () => {
   });
 });
 
+describe('buildVectorMbtiles with SCAMIN', () => {
+  let tmp: string;
+  let db: DatabaseSync;
+  const near = (i: number): [number, number] => [0.01 + i * 0.001, 0.01];
+
+  before(async () => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sk-charts-scamin-'));
+    // On the equator SCAMIN 90000 is reached at z13 (see s57-scamin.ts).
+    const point = (c: string, i: number, props: Record<string, unknown> = {}): unknown => ({
+      type: 'Feature',
+      properties: { c, ...props },
+      geometry: { type: 'Point', coordinates: near(i) }
+    });
+    writeFC(path.join(tmp, 'soundg.geojson'), [
+      point('coastal', 0, { SCAMIN: 90000 }),
+      point('overview', 1, { SCAMIN: 1e9 }),
+      point('berth', 2, { SCAMIN: 1000 }),
+      point('none', 3)
+    ]);
+    writeFC(path.join(tmp, 'plain.geojson'), [point('unflagged', 4, { SCAMIN: 90000 })]);
+    const output = path.join(tmp, 'out.mbtiles');
+    await withWorkerPool(2, undefined, (pool) =>
+      buildVectorMbtiles({
+        sources: [
+          {
+            layer: 'SOUNDG',
+            minzoom: 9,
+            maxzoom: 14,
+            scamin: true,
+            files: [path.join(tmp, 'soundg.geojson')]
+          },
+          { layer: 'PLAIN', minzoom: 9, maxzoom: 14, files: [path.join(tmp, 'plain.geojson')] }
+        ],
+        output,
+        scratchDir: path.join(tmp, 'scratch'),
+        pool,
+        name: 'SCAMIN chart'
+      })
+    );
+    db = new DatabaseSync(output);
+  });
+
+  after(() => {
+    db.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const shownAt = (layer: string, z: number): string[] => {
+    const tile = readTileAt(db, ...near(0), z);
+    const l = tile?.layers[layer];
+    return Array.from({ length: l?.length ?? 0 }, (_, i) =>
+      String(l?.feature(i).properties.c)
+    ).sort();
+  };
+
+  it('leaves a feature out of tiles below its SCAMIN zoom, within its source range', () => {
+    assert.deepStrictEqual(shownAt('SOUNDG', 9), ['none', 'overview']);
+    assert.deepStrictEqual(shownAt('SOUNDG', 12), ['none', 'overview']);
+    assert.deepStrictEqual(shownAt('SOUNDG', 13), ['coastal', 'none', 'overview']);
+    // Capped at the source's maxzoom, so clients overzooming it still draw it.
+    assert.deepStrictEqual(shownAt('SOUNDG', 14), ['berth', 'coastal', 'none', 'overview']);
+  });
+
+  it('ignores SCAMIN for sources that do not ask for it', () => {
+    assert.deepStrictEqual(shownAt('PLAIN', 9), ['unflagged']);
+  });
+
+  it('keeps its bookkeeping out of the tiles', () => {
+    const tile = readTileAt(db, ...near(0), 14);
+    const layer = tile?.layers.SOUNDG;
+    for (let i = 0; i < (layer?.length ?? 0); i++) {
+      const keys = Object.keys(layer?.feature(i).properties ?? {}).sort();
+      assert.ok(
+        keys.every((k) => k === 'c' || k === 'SCAMIN'),
+        keys.join(',')
+      );
+    }
+    const meta = db.prepare("SELECT value FROM metadata WHERE name = 'json'").get() as {
+      value: string;
+    };
+    const layers = (
+      JSON.parse(meta.value) as { vector_layers: { id: string; fields: Record<string, string> }[] }
+    ).vector_layers;
+    const soundg = layers.find((l) => l.id === 'SOUNDG');
+    assert.deepStrictEqual(Object.keys(soundg?.fields ?? {}).sort(), ['SCAMIN', 'c']);
+  });
+});
+
 describe('buildVectorMbtiles failures', () => {
   it('rejects when no source has features and leaves no output behind', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sk-charts-tiler-empty-'));

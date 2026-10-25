@@ -12,7 +12,8 @@ import {
   planTileSources
 } from '../dist/utils/s57-converter.js';
 
-const { surfaceExportErrorsIfEmpty, wantedMbtilesName, SKIP_LAYERS } = _testInternals;
+const { scaminMinzoom, surfaceExportErrorsIfEmpty, wantedMbtilesName, SKIP_LAYERS } =
+  _testInternals;
 
 interface GeoJSONFeature {
   type: 'Feature';
@@ -60,6 +61,67 @@ describe('bandZoomRange', () => {
 
   it('uses the user range for cells without a band (IENC, hand-named)', () => {
     assert.deepStrictEqual(bandZoomRange(null, 4, 18), { minzoom: 4, maxzoom: 18 });
+  });
+});
+
+describe('scaminMinzoom', () => {
+  const at = (scamin: unknown, coordinates: unknown): number | null =>
+    scaminMinzoom({ type: 'Feature', properties: { SCAMIN: scamin }, geometry: { coordinates } });
+
+  it('gives the first zoom whose scale reaches 1:SCAMIN', () => {
+    // On the equator z12 is 1:136,495 and z13 is 1:68,247.
+    assert.strictEqual(at(90000, [0, 0]), 13);
+    assert.strictEqual(at(136500, [0, 0]), 12);
+    assert.strictEqual(at(1_000_000, [0, 0]), 10);
+  });
+
+  it('accounts for the mercator scale shrinking with latitude', () => {
+    // At 60° a tile shows half the ground distance, so one zoom earlier.
+    assert.strictEqual(at(90000, [10, 60]), 12);
+    assert.strictEqual(at(90000, [10, -60]), 12);
+  });
+
+  it('takes the position farthest from the equator, so no part of the feature is cut', () => {
+    // A line from 0° to 60°: its 60° end qualifies at z12, the equator end only at z13.
+    assert.strictEqual(
+      at(90000, [
+        [10, 0],
+        [10, 60]
+      ]),
+      12
+    );
+    assert.strictEqual(
+      at(90000, [
+        [
+          [10, 0],
+          [10, -60],
+          [11, 0],
+          [10, 0]
+        ]
+      ]),
+      12
+    );
+  });
+
+  it('reads the positions of lines, polygons and 3D sounding points', () => {
+    assert.strictEqual(
+      at(90000, [
+        [
+          [10, 60],
+          [11, 61]
+        ]
+      ]),
+      12
+    );
+    assert.strictEqual(at(90000, [[10, 60, 4.2]]), 12);
+  });
+
+  it('takes a numeric string, ignores missing, zero or unparseable values', () => {
+    assert.strictEqual(at('90000', [0, 0]), 13);
+    assert.strictEqual(at(undefined, [0, 0]), null);
+    assert.strictEqual(at(0, [0, 0]), null);
+    assert.strictEqual(at('n/a', [0, 0]), null);
+    assert.strictEqual(at(90000, []), null);
   });
 });
 

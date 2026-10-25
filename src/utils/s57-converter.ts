@@ -21,6 +21,7 @@ import { extractLocalChartSource, isS57Cell, type LocalChartSource } from './loc
 import { patchS57Mbtiles, setMbtilesDisplayName } from './mbtiles-metadata.js';
 import { addRasterOverviews } from './raster-pyramid.js';
 import { BAND_MAX_ZOOM, BAND_MIN_ZOOM, detectEncBand, exportFileParts } from './s57-band.js';
+import { scaminMinzoom } from './s57-scamin.js';
 import { extractTarArchive } from './tar-extract.js';
 import { buildVectorMbtiles, type TileSource } from './vector-tiler.js';
 import {
@@ -408,7 +409,9 @@ export function bandZoomRange(
  * harbour cell's features thus never crowd the overview zooms, and a band-2
  * cell's coarse coastline never draws over a harbour plan, in one pass over
  * the whole bundle. Cells whose names don't follow the IHO convention (IENC,
- * hand-named) use the user's range. Empty exports are skipped.
+ * hand-named) use the user's range. Empty exports are skipped. Within its
+ * source's range, a feature with a SCAMIN attribute shows only from the zoom
+ * S-52 shows it at (s57-scamin.ts).
  */
 export function planTileSources(
   geojsonDir: string,
@@ -431,7 +434,7 @@ export function planTileSources(
       continue;
     }
     const key = `${layer}/${String(minzoom)}/${String(maxzoom)}`;
-    const source = sources.get(key) ?? { layer, minzoom, maxzoom, files: [] };
+    const source = sources.get(key) ?? { layer, minzoom, maxzoom, scamin: true, files: [] };
     source.files.push(fullPath);
     sources.set(key, source);
   }
@@ -439,6 +442,7 @@ export function planTileSources(
 }
 
 export const _testInternals = {
+  scaminMinzoom,
   surfaceExportErrorsIfEmpty,
   uniqueCells,
   wantedMbtilesName,
