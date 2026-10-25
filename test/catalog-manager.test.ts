@@ -25,7 +25,11 @@ import {
   pruneStaleInstalls,
   refreshCatalog,
   refreshCatalogIfStale,
-  setCatalogChangedListener
+  setCatalogChangedListener,
+  setConvertingState,
+  getConversionSlotsInUse,
+  reservePendingConversion,
+  releasePendingConversion
 } from '../dist/utils/catalog-manager.js';
 import type { CatalogInstall } from '../dist/types.js';
 
@@ -1101,6 +1105,29 @@ describe('CatalogManager', () => {
       await initCatalogManagerOffline();
       assert.ok(!fs.existsSync(path.join(cacheDir, '_registry.json')));
       assert.ok(!fs.existsSync(path.join(cacheDir, 'NOAA_MBTiles_Catalog.json')));
+    });
+  });
+
+  describe('conversion slots', () => {
+    it('counts downloads that will convert alongside running conversions', () => {
+      const before = getConversionSlotsInUse();
+      reservePendingConversion('dl_a');
+      reservePendingConversion('dl_b');
+      setConvertingState('slot-chart', true);
+      assert.strictEqual(getConversionSlotsInUse(), before + 3);
+
+      // A finished download releases its slot as its conversion takes one.
+      releasePendingConversion('dl_a');
+      assert.strictEqual(getConversionSlotsInUse(), before + 2);
+
+      // Releasing twice, or a job that never reserved, changes nothing.
+      releasePendingConversion('dl_a');
+      releasePendingConversion('dl_unknown');
+      assert.strictEqual(getConversionSlotsInUse(), before + 2);
+
+      releasePendingConversion('dl_b');
+      setConvertingState('slot-chart', false);
+      assert.strictEqual(getConversionSlotsInUse(), before);
     });
   });
 });
