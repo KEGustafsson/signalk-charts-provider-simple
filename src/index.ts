@@ -17,6 +17,7 @@ import {
   getCatalogsWithInstalledCharts,
   getConvertingCharts,
   getConversionSlotsInUse,
+  isConversionNameInUse,
   releasePendingConversion,
   reservePendingConversion,
   getInstalledCatalogCharts,
@@ -154,6 +155,7 @@ import {
   refreshEncIndexIfStale
 } from './utils/enc-index-manager.js';
 import { resolveChartSet } from './utils/enc-chart-set.js';
+import { holdWorkDir, releaseWorkDir, sweepLeftoverTempDirs } from './utils/temp-dirs.js';
 import {
   LocalSourceError,
   inspectLocalChartSource,
@@ -807,16 +809,9 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     };
     initLandIndex(dataDir, landIndexOptions);
 
-    const tempDirPattern =
-      /^((s57-download-|rnc-download-|pilot-download-|shp-download-|gshhg-|convert-upload-|custom-catalog-)\d+|convert-local-\w+)$/;
     try {
-      const dataDirEntries = fs.readdirSync(dataDir, { withFileTypes: true });
-      for (const entry of dataDirEntries) {
-        if (entry.isDirectory() && tempDirPattern.test(entry.name)) {
-          const fullPath = path.join(dataDir, entry.name);
-          console.log(`[charts-provider] Removing leftover temp directory: ${entry.name}`);
-          cleanupDir(fullPath);
-        }
+      for (const name of sweepLeftoverTempDirs(dataDir)) {
+        console.log(`[charts-provider] Removed leftover temp directory: ${name}`);
       }
     } catch (e) {
       app.debug(
@@ -3917,10 +3912,11 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
 
         // Both checks come after the folder is read, with nothing awaited from
         // here to setConvertingState, so two requests cannot both pass them.
-        // The converting state is keyed by name: a second conversion of a name
-        // would share the first's slot, and the first to end would free it.
+        // The converting state is keyed by name: a second conversion of a name,
+        // running or still downloading, would share the first's slot, and the
+        // first to end would free it.
         const chartNumber = source.name.replace(/[^a-zA-Z0-9_-]/g, '_');
-        if (Object.hasOwn(getConvertingCharts(), chartNumber)) {
+        if (isConversionNameInUse(chartNumber)) {
           res.status(409).json({
             success: false,
             error: `${source.name} is already being converted. Please wait for it to finish.`
@@ -3953,6 +3949,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
           });
           return;
         }
+        holdWorkDir(workDir);
         setConvertingState(chartNumber, true);
         res.json({
           success: true,
@@ -3997,6 +3994,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
           setConvertingState(chartNumber, false);
           cleanupQuarantineDir(quarantineDir);
           cleanupDir(workDir);
+          releaseWorkDir(workDir);
         }
       })();
     });
@@ -4494,7 +4492,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     fs.mkdirSync(tmpDownloadDir, { recursive: true });
 
     const jobId = downloadManager.createJob(url, tmpDownloadDir, chartNumber, { saveRaw: true });
-    reservePendingConversion(jobId);
+    reservePendingConversion(jobId, chartNumber);
 
     trackInstall(chartNumber, catalogFile, zipfileDatetime ?? '', url);
     // Don't flag converting yet — the download still has to finish.
@@ -4617,7 +4615,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     fs.mkdirSync(tmpDownloadDir, { recursive: true });
 
     const jobId = downloadManager.createJob(url, tmpDownloadDir, chartNumber, { saveRaw: true });
-    reservePendingConversion(jobId);
+    reservePendingConversion(jobId, chartNumber);
 
     trackInstall(chartNumber, catalogFile, zipfileDatetime ?? '', url);
     // Set converting state inside the listener once the download has
@@ -4732,7 +4730,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     fs.mkdirSync(tmpDownloadDir, { recursive: true });
 
     const jobId = downloadManager.createJob(url, tmpDownloadDir, chartNumber, { saveRaw: true });
-    reservePendingConversion(jobId);
+    reservePendingConversion(jobId, chartNumber);
 
     trackInstall(chartNumber, catalogFile, zipfileDatetime ?? '', url);
     // Set converting state inside the listener once the download has
@@ -4834,7 +4832,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     fs.mkdirSync(tmpDownloadDir, { recursive: true });
 
     const jobId = downloadManager.createJob(url, tmpDownloadDir, chartNumber, { saveRaw: true });
-    reservePendingConversion(jobId);
+    reservePendingConversion(jobId, chartNumber);
 
     trackInstall(chartNumber, catalogFile, zipfileDatetime ?? '', url);
     // Set converting state inside the listener once the download has
