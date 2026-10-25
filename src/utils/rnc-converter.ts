@@ -4,6 +4,11 @@ import unzipper from 'unzipper';
 import { getCpuBudget } from './concurrency.js';
 import { MAX_CONVERSION_LOG_LINES } from './conversion-log.js';
 import { setConversionResult } from './conversion-progress.js';
+import {
+  extractLocalChartSource,
+  isBsbChart,
+  type LocalChartSource
+} from './local-chart-source.js';
 import { setMbtilesType } from './mbtiles-metadata.js';
 import { addRasterOverviews } from './raster-pyramid.js';
 import { extractTarArchive } from './tar-extract.js';
@@ -116,6 +121,79 @@ export function chartOutputNames(files: readonly string[]): string[] {
     taken.add(name.toLowerCase());
     return name;
   });
+}
+
+async function convertBsbCharts(
+  kapFiles: readonly string[],
+  chartsDir: string,
+  chartNumber: string,
+  statusFn: StatusCallback
+): Promise<RncConversionResult> {
+  debug(`Found ${kapFiles.length} BSB chart file(s) to convert`);
+  appendLog(chartNumber, `Found ${kapFiles.length} BSB chart file(s)`);
+
+  statusFn('converting', `Converting ${kapFiles.length} BSB chart(s) to MBTiles...`);
+  setConvertProgress(chartNumber, 'converting', `Converting ${kapFiles.length} chart(s)...`);
+  const mbtilesFiles = await convertKapFiles(kapFiles, chartsDir, chartNumber);
+
+  if (mbtilesFiles.length === 0) {
+    throw new Error('No charts converted');
+  }
+
+  const doneMsg = `Converted ${mbtilesFiles.length} chart(s) to MBTiles`;
+  statusFn('completed', doneMsg);
+
+  if (chartNumber) {
+    setConversionCompleted(chartNumber, doneMsg);
+  }
+
+  return { mbtilesFiles };
+}
+
+/**
+ * Convert the BSB charts of a folder or ZIP on the server's disk (see
+ * local-chart-source.ts), one MBTiles each, into `chartsDir`. Its archives
+ * are extracted under `workDir`, which the caller removes; the source is
+ * only read.
+ */
+export async function processRncLocal(
+  source: LocalChartSource,
+  workDir: string,
+  chartsDir: string,
+  chartNumber: string,
+  onStatus: StatusCallback | null
+): Promise<RncConversionResult> {
+  const statusFn = onStatus ?? (() => {});
+  conversionProgress[chartNumber] = {
+    status: 'extracting',
+    message: 'Reading the chart folder...',
+    log: []
+  };
+  try {
+    let kapFiles: string[];
+    try {
+      kapFiles = await extractLocalChartSource(source, isBsbChart, workDir, (zip, index, count) => {
+        const message = `Extracting ${path.basename(zip)} (${String(index)}/${String(count)})...`;
+        statusFn('extracting', message);
+        setConvertProgress(chartNumber, 'extracting', message);
+      });
+    } catch (err) {
+      throw new Error(
+        `Extracting the ZIP files failed: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err }
+      );
+    }
+    if (kapFiles.length === 0) {
+      throw new Error('No .kap or .bsb files found');
+    }
+    return await convertBsbCharts(kapFiles, chartsDir, chartNumber, statusFn);
+  } catch (err) {
+    setConversionFailed(
+      chartNumber,
+      (err instanceof Error ? err.message : String(err)) || 'Conversion failed'
+    );
+    throw err;
+  }
 }
 
 /**
@@ -236,25 +314,7 @@ export async function processRncZip(
       throw new Error('No .kap or .bsb files found in ZIP archive');
     }
 
-    debug(`Found ${kapFiles.length} BSB chart file(s) to convert`);
-    appendLog(chartNumber, `Found ${kapFiles.length} BSB chart file(s)`);
-
-    statusFn('converting', `Converting ${kapFiles.length} BSB chart(s) to MBTiles...`);
-    setConvertProgress(chartNumber, 'converting', `Converting ${kapFiles.length} chart(s)...`);
-    const mbtilesFiles = await convertKapFiles(kapFiles, chartsDir, chartNumber);
-
-    if (mbtilesFiles.length === 0) {
-      throw new Error('No charts converted');
-    }
-
-    const doneMsg = `Converted ${mbtilesFiles.length} chart(s) to MBTiles`;
-    statusFn('completed', doneMsg);
-
-    if (chartNumber) {
-      setConversionCompleted(chartNumber, doneMsg);
-    }
-
-    return { mbtilesFiles };
+    return await convertBsbCharts(kapFiles, chartsDir, chartNumber, statusFn);
   } catch (err) {
     if (chartNumber) {
       setConversionFailed(

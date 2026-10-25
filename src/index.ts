@@ -128,6 +128,7 @@ import {
   getConversionProgress as getRncProgress,
   initRncConverter,
   processPilotTar,
+  processRncLocal,
   processRncZip,
   setConversionFailed as setRncFailed
 } from './utils/rnc-converter.js';
@@ -139,6 +140,7 @@ import {
   initS57Converter,
   processGshhg,
   processS57Directory,
+  processS57Local,
   processS57Zip,
   processShpBasemap,
   setConversionFailed as setS57Failed
@@ -152,6 +154,12 @@ import {
   refreshEncIndexIfStale
 } from './utils/enc-index-manager.js';
 import { resolveChartSet } from './utils/enc-chart-set.js';
+import {
+  LocalSourceError,
+  inspectLocalChartSource,
+  isBsbChart,
+  isS57Cell
+} from './utils/local-chart-source.js';
 import {
   cachedGeojsonFor,
   cellsDir,
@@ -800,7 +808,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     initLandIndex(dataDir, landIndexOptions);
 
     const tempDirPattern =
-      /^(s57-download-|rnc-download-|pilot-download-|shp-download-|gshhg-|convert-upload-|custom-catalog-)\d+$/;
+      /^(s57-download-|rnc-download-|pilot-download-|shp-download-|gshhg-|convert-upload-|convert-local-|custom-catalog-)\d+$/;
     try {
       const dataDirEntries = fs.readdirSync(dataDir, { withFileTypes: true });
       for (const entry of dataDirEntries) {
@@ -1393,6 +1401,14 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
 
   const ConvertUploadFields = Type.Object({
     type: Type.Union([Type.Literal('s57'), Type.Literal('rnc')]),
+    minzoom: Type.Optional(ZoomLevel),
+    maxzoom: Type.Optional(ZoomLevel)
+  });
+
+  const ConvertLocalBody = Type.Object({
+    type: Type.Union([Type.Literal('s57'), Type.Literal('rnc')]),
+    // A folder or ZIP file on the Signal K server's own disk.
+    path: Type.String({ minLength: 1, maxLength: 4096 }),
     minzoom: Type.Optional(ZoomLevel),
     maxzoom: Type.Optional(ZoomLevel)
   });
@@ -3709,6 +3725,26 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
       }
     });
 
+    // Move a conversion's charts from its quarantine into the chart folder,
+    // enable them, and announce them to chart plotters.
+    const installConvertedCharts = async (
+      quarantineDir: string,
+      files: string[],
+      chartPath: string
+    ): Promise<void> => {
+      await promoteQuarantine(quarantineDir, files, chartPath);
+      for (const file of files) {
+        setChartEnabled(path.relative(chartPath, path.join(chartPath, file)), true);
+      }
+      await refreshChartProviders();
+      for (const file of files) {
+        const chartId = file.replace(/\.mbtiles$/, '');
+        if (chartProviders[chartId]) {
+          emitChartDelta(chartId, sanitizeProvider(chartProviders[chartId], 2));
+        }
+      }
+    };
+
     router.post('/convert-upload', (req: Request, res: Response) => {
       const bb = Busboy({ headers: req.headers, limits: { fileSize: 500 * 1024 * 1024 } });
       const chartPath = props.chartPath || defaultChartsPath;
@@ -3809,19 +3845,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
                 { minzoom, maxzoom }
               );
 
-              await promoteQuarantine(quarantineDir, [result.mbtilesFile], chartPath);
-
-              const relativePath = path.relative(
-                chartPath,
-                path.join(chartPath, result.mbtilesFile)
-              );
-              setChartEnabled(relativePath, true);
-              await refreshChartProviders();
-              const chartId = result.mbtilesFile.replace(/\.mbtiles$/, '');
-              if (chartProviders[chartId]) {
-                const chartData = sanitizeProvider(chartProviders[chartId], 2);
-                emitChartDelta(chartId, chartData);
-              }
+              await installConvertedCharts(quarantineDir, [result.mbtilesFile], chartPath);
               app.debug(`Convert complete: ${chartNumber} → ${result.mbtilesFile}`);
             } else if (convType === 'rnc') {
               const result = await processRncZip(
@@ -3833,20 +3857,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
                 }
               );
 
-              await promoteQuarantine(quarantineDir, result.mbtilesFiles, chartPath);
-
-              for (const mbtilesFile of result.mbtilesFiles) {
-                const relativePath = path.relative(chartPath, path.join(chartPath, mbtilesFile));
-                setChartEnabled(relativePath, true);
-              }
-              await refreshChartProviders();
-              for (const mbtilesFile of result.mbtilesFiles) {
-                const chartId = mbtilesFile.replace(/\.mbtiles$/, '');
-                if (chartProviders[chartId]) {
-                  const chartData = sanitizeProvider(chartProviders[chartId], 2);
-                  emitChartDelta(chartId, chartData);
-                }
-              }
+              await installConvertedCharts(quarantineDir, result.mbtilesFiles, chartPath);
               app.debug(`Convert complete: ${chartNumber} → ${result.mbtilesFiles.join(', ')}`);
             }
           } catch (error) {
@@ -3862,6 +3873,121 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
       });
 
       req.pipe(bb);
+    });
+
+    // Convert charts already on the server's disk: a folder of S-57 cells or
+    // BSB charts, loose or in ZIP files, or one ZIP. The source is only read;
+    // its archives are extracted into a work folder in the data dir.
+    router.post('/convert-local', (req: Request, res: Response) => {
+      const body = parseBody(ConvertLocalBody, req, res);
+      if (!body) {
+        return;
+      }
+      const minzoom = body.minzoom ?? 9;
+      const maxzoom = body.maxzoom ?? 16;
+      if (minzoom > maxzoom) {
+        res.status(400).json({ success: false, error: 'minzoom must be ≤ maxzoom' });
+        return;
+      }
+      const chartPath = props.chartPath || defaultChartsPath;
+      const isS57 = body.type === 's57';
+
+      void (async () => {
+        let source;
+        try {
+          source = await inspectLocalChartSource(
+            body.path,
+            isS57 ? isS57Cell : isBsbChart,
+            isS57 ? 'S-57 ENC cells (.000)' : 'BSB charts (.kap)'
+          );
+        } catch (err) {
+          if (err instanceof LocalSourceError) {
+            res.status(400).json({ success: false, error: err.message });
+          } else {
+            res.status(500).json({
+              success: false,
+              error: `Failed to read ${body.path}: ${err instanceof Error ? err.message : String(err)}`
+            });
+          }
+          return;
+        }
+        for (const unreadable of source.unreadableZips) {
+          console.warn(`[charts-provider] Skipping unreadable ZIP file ${unreadable}`);
+        }
+
+        // Checked after the folder is read, with nothing awaited from here
+        // to setConvertingState, so two requests cannot both take the last slot.
+        const budgetMax = getCpuBudget().maxConcurrentConversions;
+        if (getConversionSlotsInUse() >= budgetMax) {
+          res.status(429).json({
+            success: false,
+            error: `Too many conversions running (max ${budgetMax}). Please wait for a conversion to finish.`
+          });
+          return;
+        }
+
+        const chartNumber = source.name.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const workDir = path.join(app.getDataDirPath(), `convert-local-${Date.now()}`);
+        let quarantineDir: string;
+        try {
+          fs.mkdirSync(workDir, { recursive: true });
+          quarantineDir = makeUniqueQuarantineDir(app.getDataDirPath(), chartNumber);
+        } catch (err) {
+          cleanupDir(workDir);
+          res.status(500).json({
+            success: false,
+            error: `Failed to prepare conversion workspace: ${
+              err instanceof Error ? err.message : String(err)
+            }`
+          });
+          return;
+        }
+        setConvertingState(chartNumber, true);
+        res.json({
+          success: true,
+          chartNumber,
+          looseFiles: source.looseFiles.length,
+          zips: source.zips.length,
+          unreadableZips: source.unreadableZips.length,
+          message: 'Conversion started'
+        });
+
+        const onStatus = (status: string, message: string): void => {
+          app.debug(`Convert [${chartNumber}] ${status}: ${message}`);
+        };
+        try {
+          if (isS57) {
+            const result = await processS57Local(
+              source,
+              workDir,
+              quarantineDir,
+              chartNumber,
+              onStatus,
+              { minzoom, maxzoom }
+            );
+            await installConvertedCharts(quarantineDir, [result.mbtilesFile], chartPath);
+            app.debug(`Convert complete: ${chartNumber} → ${result.mbtilesFile}`);
+          } else {
+            const result = await processRncLocal(
+              source,
+              workDir,
+              quarantineDir,
+              chartNumber,
+              onStatus
+            );
+            await installConvertedCharts(quarantineDir, result.mbtilesFiles, chartPath);
+            app.debug(`Convert complete: ${chartNumber} → ${result.mbtilesFiles.join(', ')}`);
+          }
+        } catch (error) {
+          app.error(
+            `Convert failed for ${chartNumber}: ${error instanceof Error ? error.message : String(error)}`
+          );
+        } finally {
+          setConvertingState(chartNumber, false);
+          cleanupQuarantineDir(quarantineDir);
+          cleanupDir(workDir);
+        }
+      })();
     });
 
     router.post('/catalog/download', (req: Request, res: Response) => {
