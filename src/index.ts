@@ -155,7 +155,7 @@ import {
   refreshEncIndexIfStale
 } from './utils/enc-index-manager.js';
 import { resolveChartSet } from './utils/enc-chart-set.js';
-import { holdWorkDir, releaseWorkDir, sweepLeftoverTempDirs } from './utils/temp-dirs.js';
+import { sweepLeftoverTempDirs } from './utils/temp-dirs.js';
 import {
   LocalSourceError,
   inspectLocalChartSource,
@@ -3794,6 +3794,19 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
 
         const validatedFile = uploadedFile;
         void (async () => {
+          const chartNumber = path
+            .basename(uploadedFileName, '.zip')
+            .replace(/[^a-zA-Z0-9_-]/g, '_');
+          // The converting state is keyed by chart number: a second conversion
+          // of one would share the first's slot.
+          if (isConversionNameInUse(chartNumber)) {
+            cleanupDir(tmpDir);
+            res.status(409).json({
+              success: false,
+              error: `${uploadedFileName} is already being converted. Please wait for it to finish.`
+            });
+            return;
+          }
           const budgetMax = getCpuBudget().maxConcurrentConversions;
           if (getConversionSlotsInUse() >= budgetMax) {
             cleanupDir(tmpDir);
@@ -3803,10 +3816,6 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
             });
             return;
           }
-
-          const chartNumber = path
-            .basename(uploadedFileName, '.zip')
-            .replace(/[^a-zA-Z0-9_-]/g, '_');
 
           // Order matters: defer the success response until
           // makeQuarantineDir has actually returned. A permission /
@@ -3949,7 +3958,6 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
           });
           return;
         }
-        holdWorkDir(workDir);
         setConvertingState(chartNumber, true);
         res.json({
           success: true,
@@ -3994,7 +4002,6 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
           setConvertingState(chartNumber, false);
           cleanupQuarantineDir(quarantineDir);
           cleanupDir(workDir);
-          releaseWorkDir(workDir);
         }
       })();
     });
@@ -4067,6 +4074,15 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
           'shp-basemap'
         ].includes(classification.format);
 
+        // The converting state is keyed by chart number: a second conversion
+        // of one would share the first's slot.
+        if (needsConversion && isConversionNameInUse(chartNumber)) {
+          res.status(409).json({
+            success: false,
+            error: `${chartNumber} is already being converted. Please wait for it to finish.`
+          });
+          return;
+        }
         const budgetMax = getCpuBudget().maxConcurrentConversions;
         if (needsConversion && getConversionSlotsInUse() >= budgetMax) {
           res.status(429).json({
@@ -5106,6 +5122,9 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
       const claimConversionSlot = (): void => {
         if (convertingFlagged) {
           return;
+        }
+        if (isConversionNameInUse(id)) {
+          throw new Error(`${id} is already being converted. Please retry when it finishes.`);
         }
         const convertBudgetMax = getCpuBudget().maxConcurrentConversions;
         if (getConversionSlotsInUse() >= convertBudgetMax) {

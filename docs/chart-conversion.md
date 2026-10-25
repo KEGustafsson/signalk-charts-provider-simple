@@ -131,7 +131,8 @@ the search reaches that many, instead of being searched in full.
 
 The source is only read. Loose charts are converted where they lie, and ZIP
 files are extracted into a new `convert-local-…` folder in the plugin's data
-directory, removed when the conversion ends; a plugin restart meanwhile (a
+directory, removed when the conversion ends. Leftover work folders are swept
+only at the server process's first start, so a plugin restart meanwhile (a
 config save) leaves it in place. The S-57 cells of the whole
 folder become one MBTiles, named after the folder or ZIP; BSB charts become one
 MBTiles each, as with an upload. When Signal K runs in Docker, the path is
