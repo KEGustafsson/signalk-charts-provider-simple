@@ -64,7 +64,9 @@ export function resolveLocalPath(input: string): string {
       ? path.join(os.homedir(), trimmed.slice(1))
       : trimmed;
   if (!path.isAbsolute(expanded)) {
-    throw new LocalSourceError(`Use a full path, such as /home/pi/charts (got "${trimmed}")`);
+    throw new LocalSourceError(
+      `Use a full path, such as /srv/charts or ~/charts (got "${trimmed}")`
+    );
   }
   return path.resolve(expanded);
 }

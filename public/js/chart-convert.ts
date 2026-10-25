@@ -72,7 +72,7 @@ function initConvertTab(): void {
         <div class="convert-local">
           <label for="s57LocalPath">Or convert charts already on the Signal K server</label>
           <div class="convert-local-row">
-            <input type="text" id="s57LocalPath" class="input-field" placeholder="/home/pi/charts/ENC_ROOT"
+            <input type="text" id="s57LocalPath" class="input-field" placeholder="~/charts/ENC_ROOT"
               spellcheck="false" autocomplete="off" data-convert-local-input="s57">
             <button type="button" class="btn btn-primary" data-convert-local="s57">Convert</button>
           </div>
@@ -117,7 +117,7 @@ function initConvertTab(): void {
         <div class="convert-local">
           <label for="rncLocalPath">Or convert charts already on the Signal K server</label>
           <div class="convert-local-row">
-            <input type="text" id="rncLocalPath" class="input-field" placeholder="/home/pi/charts/BSB_ROOT"
+            <input type="text" id="rncLocalPath" class="input-field" placeholder="~/charts/BSB_ROOT"
               spellcheck="false" autocomplete="off" data-convert-local-input="rnc">
             <button type="button" class="btn btn-primary" data-convert-local="rnc">Convert</button>
           </div>
