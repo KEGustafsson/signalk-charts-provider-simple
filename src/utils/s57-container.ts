@@ -96,8 +96,10 @@ const logLines =
 function stageCells(cells: readonly string[], destDir: string): void {
   fs.mkdirSync(destDir, { recursive: true });
   for (const cell of cells) {
+    const stem = path.basename(cell, path.extname(cell));
     for (const file of cellFiles(cell)) {
-      const dest = path.join(destDir, path.basename(file));
+      // Under the cell's own name: GDAL looks for its updates by that name.
+      const dest = path.join(destDir, `${stem}${path.extname(file)}`);
       try {
         fs.linkSync(file, dest);
       } catch {

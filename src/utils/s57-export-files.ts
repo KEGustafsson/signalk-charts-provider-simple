@@ -91,10 +91,12 @@ const UPDATE_EXTENSION = /^\.\d{3}$/;
 /**
  * The files GDAL reads for a cell: its `.000` and the update files beside it
  * (`.001`, `.002`, …), which the S-57 driver applies when it opens the cell.
+ * An update's name is matched without regard to case, as producers differ;
+ * whoever places these for GDAL names each after the cell.
  */
 export function cellFiles(cell: string): string[] {
   const dir = path.dirname(cell);
-  const stem = path.basename(cell, path.extname(cell));
+  const stem = path.basename(cell, path.extname(cell)).toUpperCase();
   const files = [cell];
   let names: string[];
   try {
@@ -105,7 +107,7 @@ export function cellFiles(cell: string): string[] {
   for (const name of names) {
     const ext = path.extname(name);
     if (
-      path.basename(name, ext) === stem &&
+      path.basename(name, ext).toUpperCase() === stem &&
       UPDATE_EXTENSION.test(ext) &&
       ext !== '.000' &&
       fs.statSync(path.join(dir, name)).isFile()

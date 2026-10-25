@@ -954,4 +954,18 @@ describe('stageCells (the cells a container export sees)', () => {
     ]);
     assert.strictEqual(fs.readFileSync(path.join(dest, 'US5MA1SK.002'), 'utf8'), 'US5MA1SK.002');
   });
+
+  it("stages an update named in another case under the cell's name", () => {
+    const dir = path.join(tmp, 'mixed-case');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'US5MA3SK.000'), 'base');
+    fs.writeFileSync(path.join(dir, 'us5ma3sk.001'), 'lower-case update');
+    const dest = path.join(tmp, 'staged-mixed');
+    stageCells([path.join(dir, 'US5MA3SK.000')], dest);
+    assert.deepStrictEqual(fs.readdirSync(dest).sort(), ['US5MA3SK.000', 'US5MA3SK.001']);
+    assert.strictEqual(
+      fs.readFileSync(path.join(dest, 'US5MA3SK.001'), 'utf8'),
+      'lower-case update'
+    );
+  });
 });

@@ -294,6 +294,32 @@ describe('S-57 updates kept apart from their cells', () => {
     assert.deepEqual(withUpdates, []);
   });
 
+  it('prefers an update beside the cell named in another case over one elsewhere', () => {
+    const dir = path.join(TMP, 'updates-case');
+    const cell = path.join(dir, 'cells', 'US5MA4AA.000');
+    write(cell, 'base');
+    write(path.join(dir, 'cells', 'us5ma4aa.001'), 'beside');
+    const elsewhere = path.join(dir, 'updates', 'US5MA4AA.001');
+    write(elsewhere, 'elsewhere');
+    write(path.join(dir, 'updates', 'US5MA4AA.002'), 'second');
+    const { cells, withUpdates } = gatherCellUpdates(
+      [cell],
+      [elsewhere, path.join(dir, 'updates', 'US5MA4AA.002')],
+      path.join(TMP, 'updates-case-work')
+    );
+    assert.deepEqual(withUpdates, ['US5MA4AA']);
+    const placed = path.dirname(cells[0]);
+    assert.deepEqual(
+      Object.fromEntries(
+        fs
+          .readdirSync(placed)
+          .sort()
+          .map((f) => [f, fs.readFileSync(path.join(placed, f), 'utf8')])
+      ),
+      { 'US5MA4AA.000': 'base', 'US5MA4AA.001': 'beside', 'US5MA4AA.002': 'second' }
+    );
+  });
+
   it('still needs a cell: updates alone are nothing to convert', async () => {
     const dir = path.join(TMP, 'updates-only');
     write(
