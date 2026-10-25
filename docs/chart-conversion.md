@@ -130,7 +130,7 @@ more than `MAX_SCAN_ENTRIES` entries, such as a disk's root, is refused once
 the search reaches that many, instead of being searched in full.
 
 The source is only read. Loose charts are converted where they lie, and ZIP
-files are extracted into a `convert-local-<time>` folder in the plugin's data
+files are extracted into a new `convert-local-…` folder in the plugin's data
 directory, removed when the conversion ends. The S-57 cells of the whole
 folder become one MBTiles, named after the folder or ZIP; BSB charts become one
 MBTiles each, as with an upload. When Signal K runs in Docker, the path is
