@@ -1092,6 +1092,18 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
       }
       for (const file of allFiles) {
         if (file.name.endsWith('.mbtiles') && !validPaths.has(file.path)) {
+          // A file changed since the listing was replaced after the charts
+          // were validated, by a conversion promoting a chart of the same
+          // name: it is not the file found invalid, so it is kept.
+          let current: fs.Stats;
+          try {
+            current = fs.statSync(file.path);
+          } catch {
+            continue;
+          }
+          if (current.size !== file.size || current.mtimeMs !== file.dateModified) {
+            continue;
+          }
           console.log(`[charts-provider] Removing invalid .mbtiles file: ${file.name}`);
           try {
             fs.unlinkSync(file.path);
