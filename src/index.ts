@@ -239,6 +239,13 @@ const chartTilesPath = `/signalk/v1/api/resources/charts`;
 
 const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
   let chartProviders: Record<string, ChartProvider> = {};
+  // Bumped by stop(), so a chart scan still running then closes what it
+  // opened instead of installing handles nothing will close.
+  let lifecycle = 0;
+  // A refresh can also start while stopped (a download finishing after
+  // stop()); its charts are closed too. False before the first start, where
+  // a refresh must still work.
+  let stopped = false;
   const resolveOnlineChart: OnlineChartResolver = (catalogId) => getOnlineCatalogChart(catalogId);
   // catalogId → chart-folder paths of its .onlinechart.json files, for the
   // Chart Catalog's "Added" state. The catalog tab polls often, so this is
@@ -498,6 +505,8 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
       });
     },
     stop: () => {
+      lifecycle++;
+      stopped = true;
       setCatalogChangedListener(null);
       internet?.stop();
       internet = null;
@@ -644,6 +653,8 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
   };
 
   const doStartup = async (config: PluginConfig): Promise<void> => {
+    stopped = false;
+    const started = lifecycle;
     app.debug(`** loaded config: ${JSON.stringify(config)}`);
     props = { ...config };
     internet?.stop();
@@ -832,6 +843,9 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     app.debug(`Start chart provider. Chart path: ${chartPath}`);
     onlineTimeActive = true;
     const loadOk = await loadChartProviders(chartPath);
+    if (lifecycle !== started) {
+      return;
+    }
 
     if (serverMajorVersion === 2) {
       app.debug('** Registering v2 API paths **');
@@ -903,6 +917,11 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         }
       }
     });
+    // The wait can outlast this lifecycle; a stopped plugin starts no timers,
+    // listeners or housekeeping.
+    if (lifecycle !== started) {
+      return;
+    }
     if (!containerManager) {
       // Only raise the missing runtime to an ERROR when something actually
       // needs it (see hasContainerDependentCharts). A pure display setup
@@ -933,6 +952,10 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
           const cleanup = await containerManager.cleanupOrphanedJobs({
             ownerPluginId: PLUGIN_OWNER_ID
           });
+          // The next start reaps them again.
+          if (lifecycle !== started) {
+            return;
+          }
           // Labels we set on runJob calls have the form
           // `<stage>-<chartNumber>`, where <stage> is one of a fixed
           // set of strings (gdal-export, tippecanoe, gdal-translate,
@@ -991,6 +1014,9 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
           app.debug(`Orphan cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
+    }
+    if (lifecycle !== started) {
+      return;
     }
 
     startCatalogUpdateChecker();
@@ -1127,8 +1153,13 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
   // provider is registered so `listResources` has charts to return. Returns
   // true on success, false if the chart directory could not be read.
   const loadChartProviders = async (chartPath: string): Promise<boolean> => {
+    const started = lifecycle;
     try {
       const charts = await findCharts(chartPath, resolveOnlineChart, getLandIndex() !== null);
+      if (lifecycle !== started) {
+        closeProviderHandles(Object.values(charts));
+        return false;
+      }
       pruneRasterTileCacheFor(charts);
       const enabledCharts = partitionVisibleCharts(chartPath, charts);
 
@@ -1146,6 +1177,9 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
       return true;
     } catch (e: unknown) {
       console.error(`Error loading chart providers`, e instanceof Error ? e.message : String(e));
+      if (lifecycle !== started) {
+        return false;
+      }
       chartProviders = {};
       app.setPluginError(`Error loading chart providers`);
       return false;
@@ -1154,20 +1188,23 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
 
   const cleanupChartDirectory = async (chartPath: string): Promise<void> => {
     // findCharts opens a sqlite handle per chart. This rescan's handles are
-    // never stored in chartProviders, so stop() cannot reach them and they
-    // leak — on Windows keeping every .mbtiles locked, which fails the very
-    // unlink this function performs and any later attempt to delete the
-    // directory. Closed in the finally below, on every path.
+    // never stored in chartProviders, so stop() cannot reach them. On Windows
+    // an open handle locks the .mbtiles, failing the unlinks below and any
+    // delete of the directory, so they are closed as soon as the paths are
+    // read, and in the finally below on every path.
+    const started = lifecycle;
     let scanned: ChartProvider[] = [];
     try {
       const charts = await findCharts(chartPath, resolveOnlineChart, getLandIndex() !== null);
       scanned = Object.values(charts);
+      const validPaths = new Set(scanned.map((c) => c._filePath).filter(Boolean));
+      closeProviderHandles(scanned);
+      scanned = [];
+      // A stopped plugin no longer owns the chart folder.
+      if (lifecycle !== started) {
+        return;
+      }
       const allFiles = await scanChartsRecursively(chartPath);
-      const validPaths = new Set(
-        Object.values(charts)
-          .map((c) => c._filePath)
-          .filter(Boolean)
-      );
       // Repairable charts (valid tiles, missing metadata.bounds) are
       // deliberately excluded from findCharts(), so they'd otherwise be
       // unlinked here as "invalid" — destroying the very files the repair
@@ -1175,6 +1212,9 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
       const repairable = await findRepairableCharts(chartPath);
       for (const rc of repairable) {
         validPaths.add(rc.filePath);
+      }
+      if (lifecycle !== started) {
+        return;
       }
       for (const file of allFiles) {
         if (file.name.endsWith('.mbtiles') && !validPaths.has(file.path)) {
@@ -5468,7 +5508,12 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
       // getDefaultChartsPath() (not the raw field) so a refresh requested
       // before start() has run still resolves the computed default path.
       const chartPath = props.chartPath || getDefaultChartsPath();
+      const started = lifecycle;
       const charts = await findCharts(chartPath, resolveOnlineChart, getLandIndex() !== null);
+      if (stopped || lifecycle !== started) {
+        closeProviderHandles(Object.values(charts));
+        return false;
+      }
       pruneRasterTileCacheFor(charts);
 
       // Close the handles of the map being replaced — findCharts reopened

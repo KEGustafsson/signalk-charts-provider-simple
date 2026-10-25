@@ -295,6 +295,84 @@ describe('Plugin status without signalk-container runtime', () => {
     );
   });
 
+  it('does nothing more for a startup whose container wait outlasts stop()', async () => {
+    let releaseWait: () => void = () => {};
+    const waitReleased = new Promise<void>((resolve) => {
+      releaseWait = resolve;
+    });
+    let waitStarted = false;
+    globalThis[GLOBAL_KEY] = {
+      ...globalThis[GLOBAL_KEY]!,
+      whenReady: () => {
+        waitStarted = true;
+        return waitReleased;
+      }
+    };
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'container-status-'));
+    tempDirs.push(tempDir);
+    const chartPath = path.join(tempDir, 'charts');
+    fs.mkdirSync(chartPath, { recursive: true });
+    const recording = createRecordingApp(tempDir);
+    const plugin = pluginFactory(recording.app);
+    activePlugins.push(plugin);
+
+    const logLines: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => {
+      logLines.push(args.map(String).join(' '));
+    };
+    try {
+      plugin.start({ chartPath }, () => {});
+      await waitFor(() => waitStarted, 'container wait to start');
+      plugin.stop?.();
+      releaseWait();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } finally {
+      console.log = originalLog;
+    }
+
+    assert.ok(
+      !logLines.includes(CONVERSION_DISABLED_LOG),
+      'a stopped startup must not go on past the container wait'
+    );
+    assert.deepStrictEqual(recording.errors, []);
+  });
+
+  it('does nothing more for a startup whose orphan cleanup outlasts stop()', async () => {
+    let releaseCleanup: () => void = () => {};
+    let cleanupStarted = false;
+    globalThis[GLOBAL_KEY] = {
+      ...globalThis[GLOBAL_KEY]!,
+      getRuntime: () => ({ runtime: 'podman', version: '5.0.0' }),
+      cleanupOrphanedJobs: () => {
+        cleanupStarted = true;
+        return new Promise((resolve) => {
+          releaseCleanup = () => resolve({ reaped: [] });
+        });
+      }
+    } as ContainerManagerApi;
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'container-status-'));
+    tempDirs.push(tempDir);
+    const chartPath = path.join(tempDir, 'charts');
+    fs.mkdirSync(chartPath, { recursive: true });
+    const recording = createRecordingApp(tempDir);
+    const plugin = pluginFactory(recording.app);
+    activePlugins.push(plugin);
+    const listenersBefore = downloadManager.listeners('job-completed');
+
+    plugin.start({ chartPath }, () => {});
+    await waitFor(() => cleanupStarted, 'orphan cleanup to start');
+    plugin.stop?.();
+    releaseCleanup();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    assert.deepStrictEqual(
+      downloadManager.listeners('job-completed'),
+      listenersBefore,
+      'a stopped startup must not register or replace a download listener'
+    );
+  });
+
   it('surfaces the plugin error when a conversion operation is attempted', async () => {
     const started = await startPlugin();
     activePlugins.push(started.plugin);
