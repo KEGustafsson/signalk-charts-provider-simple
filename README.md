@@ -51,7 +51,7 @@ Chart conversion (S-57 ENC, BSB raster, basemaps) is the only CPU-heavy thing th
 | `half` (default) | One job at a time on half the cores' worth of worker threads | Balanced — leaves half the box for everything else |
 | `all` | One full-throttle job with a worker thread per core; another conversion is refused (HTTP 429) until it finishes | Dedicated chart-prep box, or when you just want a chart set to finish as fast as possible |
 
-Conversion runs in worker threads, never on Signal K's event loop. The setting hot-applies — change it in the plugin config and Signal K will restart the plugin automatically; no server restart needed. In-flight conversions keep their workers; the next conversion picks up the new budget.
+Conversion runs in worker threads, never on Signal K's event loop. The limit is checked when a conversion is requested, so catalog downloads started together can each go on to convert when they finish. The setting hot-applies — change it in the plugin config and Signal K will restart the plugin automatically; no server restart needed. In-flight conversions keep their workers; the next conversion picks up the new budget.
 
 ## Usage
 
