@@ -808,7 +808,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     initLandIndex(dataDir, landIndexOptions);
 
     const tempDirPattern =
-      /^(s57-download-|rnc-download-|pilot-download-|shp-download-|gshhg-|convert-upload-|convert-local-|custom-catalog-)\d+$/;
+      /^((s57-download-|rnc-download-|pilot-download-|shp-download-|gshhg-|convert-upload-|custom-catalog-)\d+|convert-local-\w+)$/;
     try {
       const dataDirEntries = fs.readdirSync(dataDir, { withFileTypes: true });
       for (const entry of dataDirEntries) {
@@ -3915,8 +3915,18 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
           console.warn(`[charts-provider] Skipping unreadable ZIP file ${unreadable}`);
         }
 
-        // Checked after the folder is read, with nothing awaited from here
-        // to setConvertingState, so two requests cannot both take the last slot.
+        // Both checks come after the folder is read, with nothing awaited from
+        // here to setConvertingState, so two requests cannot both pass them.
+        // The converting state is keyed by name: a second conversion of a name
+        // would share the first's slot, and the first to end would free it.
+        const chartNumber = source.name.replace(/[^a-zA-Z0-9_-]/g, '_');
+        if (Object.hasOwn(getConvertingCharts(), chartNumber)) {
+          res.status(409).json({
+            success: false,
+            error: `${source.name} is already being converted. Please wait for it to finish.`
+          });
+          return;
+        }
         const budgetMax = getCpuBudget().maxConcurrentConversions;
         if (getConversionSlotsInUse() >= budgetMax) {
           res.status(429).json({
@@ -3926,14 +3936,15 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
           return;
         }
 
-        const chartNumber = source.name.replace(/[^a-zA-Z0-9_-]/g, '_');
-        const workDir = path.join(app.getDataDirPath(), `convert-local-${Date.now()}`);
+        let workDir = '';
         let quarantineDir: string;
         try {
-          fs.mkdirSync(workDir, { recursive: true });
+          workDir = fs.mkdtempSync(path.join(app.getDataDirPath(), 'convert-local-'));
           quarantineDir = makeUniqueQuarantineDir(app.getDataDirPath(), chartNumber);
         } catch (err) {
-          cleanupDir(workDir);
+          if (workDir) {
+            cleanupDir(workDir);
+          }
           res.status(500).json({
             success: false,
             error: `Failed to prepare conversion workspace: ${

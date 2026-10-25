@@ -15,7 +15,7 @@ import type { Plugin } from '@signalk/server-api';
 import type { ExtendedServerAPI } from '../dist/types.js';
 import pluginFactoryDefault from '../dist/index.js';
 import { downloadManager } from '../dist/utils/download-manager.js';
-import { getConvertingCount } from '../dist/utils/catalog-manager.js';
+import { getConvertingCount, setConvertingState } from '../dist/utils/catalog-manager.js';
 import { getConversionProgress } from '../dist/utils/rnc-converter.js';
 
 const pluginFactory = pluginFactoryDefault as unknown as (app: ExtendedServerAPI) => Plugin;
@@ -131,6 +131,21 @@ describe('POST /convert-local', () => {
       assert.match((res.body as { error: string }).error, error);
     }
     assert.strictEqual(getConvertingCount(), 0);
+  });
+
+  it('refuses a folder whose name is already converting', async () => {
+    const source = path.join(tempDir, 'Busy');
+    fs.mkdirSync(source);
+    fs.writeFileSync(path.join(source, 'busy_1.kap'), 'not a chart');
+    setConvertingState('Busy', true);
+    try {
+      const res = await convert({ type: 'rnc', path: source });
+      assert.strictEqual(res.statusCode, 409);
+      assert.match((res.body as { error: string }).error, /already being converted/);
+    } finally {
+      setConvertingState('Busy', false);
+    }
+    assert.ok(!fs.readdirSync(dataDir).some((f) => f.startsWith('convert-local-')));
   });
 
   it('leaves the source as it was when its charts fail to convert', async () => {
