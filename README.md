@@ -87,6 +87,7 @@ The interface provides seven tabs:
 3. **Convert**:
    - Upload ZIP files containing S-57 ENC (.000) or BSB raster (.kap) charts
    - Drag-and-drop or click to select files
+   - Or convert charts already on the Signal K server: enter the full path of a folder holding the charts, loose or in ZIP files, or of one ZIP file. The folder is only read. With Signal K in Docker, the path is inside the container
    - Configurable zoom levels for S-57 conversion
    - Live conversion progress with log viewer
 

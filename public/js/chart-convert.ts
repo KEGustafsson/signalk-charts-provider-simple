@@ -22,6 +22,12 @@ interface ConvertUploadResponse {
   error?: string;
 }
 
+interface ConvertLocalResponse extends ConvertUploadResponse {
+  looseFiles?: number;
+  zips?: number;
+  unreadableZips?: number;
+}
+
 let convertInitialized = false;
 let convertPodmanAvailable = false;
 const convertActiveJobs: Record<string, ConvertJob> = {};
@@ -74,7 +80,8 @@ async function initConvertTab(): Promise<void> {
       <div class="convert-section">
         <h2>Convert S-57 ENC Charts</h2>
         <p class="description">
-          Upload a ZIP file containing S-57 ENC files (.000) from your national hydrographic office.
+          Upload a ZIP file containing S-57 ENC files (.000) from your national hydrographic office,
+          or convert a folder of them that is already on the Signal K server.
           Charts will be converted to vector MBTiles using
           <a href="https://gdal.org/" target="_blank" rel="noopener">GDAL</a> and
           <a href="https://github.com/felt/tippecanoe" target="_blank" rel="noopener">tippecanoe</a> in Podman.
@@ -87,6 +94,18 @@ async function initConvertTab(): Promise<void> {
           </div>
           <div class="convert-upload-text">Drop S-57 ENC ZIP files here or click to select</div>
           <input type="file" id="s57FileInput" accept=".zip" multiple style="display:none" data-convert-type="s57">
+        </div>
+        <div class="convert-local">
+          <label for="s57LocalPath">Or convert charts already on the Signal K server</label>
+          <div class="convert-local-row">
+            <input type="text" id="s57LocalPath" class="input-field" placeholder="~/charts/ENC_ROOT"
+              spellcheck="false" autocomplete="off" data-convert-local-input="s57">
+            <button type="button" class="btn btn-primary" data-convert-local="s57">Convert</button>
+          </div>
+          <div class="convert-local-hint">
+            The full path of a folder holding S-57 cells (.000), loose or in ZIP files, or of one ZIP file.
+            ~ is the server's home folder. The folder is only read.
+          </div>
         </div>
         <div class="convert-upload-options">
           <label>Zoom levels:</label>
@@ -107,7 +126,8 @@ async function initConvertTab(): Promise<void> {
       <div class="convert-section">
         <h2>Convert BSB Raster Charts (RNC)</h2>
         <p class="description">
-          Upload a ZIP file containing BSB raster charts (.kap files).
+          Upload a ZIP file containing BSB raster charts (.kap files), or convert a folder of
+          them that is already on the Signal K server.
           Charts will be converted to MBTiles using
           <a href="https://gdal.org/" target="_blank" rel="noopener">GDAL</a> in Podman.
         </p>
@@ -119,6 +139,18 @@ async function initConvertTab(): Promise<void> {
           </div>
           <div class="convert-upload-text">Drop BSB/RNC ZIP here or click to select</div>
           <input type="file" id="rncFileInput" accept=".zip" style="display:none" data-convert-type="rnc">
+        </div>
+        <div class="convert-local">
+          <label for="rncLocalPath">Or convert charts already on the Signal K server</label>
+          <div class="convert-local-row">
+            <input type="text" id="rncLocalPath" class="input-field" placeholder="~/charts/BSB_ROOT"
+              spellcheck="false" autocomplete="off" data-convert-local-input="rnc">
+            <button type="button" class="btn btn-primary" data-convert-local="rnc">Convert</button>
+          </div>
+          <div class="convert-local-hint">
+            The full path of a folder holding BSB charts (.kap), loose or in ZIP files, or of one ZIP file.
+            ~ is the server's home folder. The folder is only read.
+          </div>
         </div>
       </div>
 
@@ -141,6 +173,23 @@ async function initConvertTab(): Promise<void> {
         return;
       }
       void handleConvertFile(input, type);
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>('button[data-convert-local]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const type = button.dataset['convertLocal'] as 's57' | 'rnc' | undefined;
+      if (type) {
+        void convertLocalPath(type);
+      }
+    });
+  });
+  document.querySelectorAll<HTMLInputElement>('input[data-convert-local-input]').forEach((input) => {
+    input.addEventListener('keydown', (ev) => {
+      const type = input.dataset['convertLocalInput'] as 's57' | 'rnc' | undefined;
+      if (ev.key === 'Enter' && type) {
+        void convertLocalPath(type);
+      }
     });
   });
 
@@ -235,6 +284,95 @@ async function handleConvertFile(input: HTMLInputElement, type: 's57' | 'rnc'): 
       await uploadConvertFile(file, type);
     }
   }
+}
+
+/** The zoom levels chosen for S-57 conversion. */
+function s57ZoomLevels(): { minzoom?: number; maxzoom?: number } {
+  const minzoom = document.getElementById('convertS57Minzoom') as HTMLSelectElement | null;
+  const maxzoom = document.getElementById('convertS57Maxzoom') as HTMLSelectElement | null;
+  return {
+    minzoom: minzoom ? Number(minzoom.value) : undefined,
+    maxzoom: maxzoom ? Number(maxzoom.value) : undefined
+  };
+}
+
+/** Plural-aware count, such as "1 ZIP file" or "3 ZIP files". */
+function convertCount(n: number, noun: string): string {
+  return `${String(n)} ${noun}${n === 1 ? '' : 's'}`;
+}
+
+async function convertLocalPath(type: 's57' | 'rnc'): Promise<void> {
+  const input = document.getElementById(`${type}LocalPath`) as HTMLInputElement | null;
+  const localPath = input?.value.trim() ?? '';
+  if (!input || localPath === '') {
+    input?.focus();
+    return;
+  }
+  if (!convertPodmanAvailable) {
+    alert(
+      'Chart conversion needs the signalk-container plugin and a Docker- or Podman-compatible runtime. See the warning above.'
+    );
+    return;
+  }
+
+  nextConvertJobId += 1;
+  const jobId = `convert_${nextConvertJobId}`;
+  convertActiveJobs[jobId] = {
+    status: 'uploading',
+    message: `Reading ${localPath}...`,
+    fileName: localPath,
+    type
+  };
+  renderConvertJobs();
+
+  try {
+    const resp = await fetch(`${CONVERT_API_BASE}/convert-local`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type, path: localPath, ...(type === 's57' ? s57ZoomLevels() : {}) })
+    });
+    let result: ConvertLocalResponse;
+    try {
+      result = (await resp.json()) as ConvertLocalResponse;
+    } catch {
+      throw new Error(`HTTP ${String(resp.status)}`);
+    }
+    if (result.success) {
+      const found: string[] = [];
+      if (result.looseFiles) {
+        found.push(convertCount(result.looseFiles, type === 's57' ? 'cell' : 'chart file'));
+      }
+      if (result.zips) {
+        found.push(convertCount(result.zips, 'ZIP file'));
+      }
+      const skipped = result.unreadableZips
+        ? ` (skipped ${convertCount(result.unreadableZips, 'unreadable ZIP file')})`
+        : '';
+      convertActiveJobs[jobId] = {
+        status: 'converting',
+        message: `Converting ${found.join(' and ')}${skipped}...`,
+        fileName: localPath,
+        type,
+        chartNumber: result.chartNumber
+      };
+      input.value = '';
+    } else {
+      convertActiveJobs[jobId] = {
+        status: 'failed',
+        message: result.error || `HTTP ${String(resp.status)}`,
+        fileName: localPath,
+        type
+      };
+    }
+  } catch (err) {
+    convertActiveJobs[jobId] = {
+      status: 'failed',
+      message: err instanceof Error ? err.message : 'Conversion failed to start',
+      fileName: localPath,
+      type
+    };
+  }
+  renderConvertJobs();
 }
 
 async function uploadConvertFile(file: File, type: 's57' | 'rnc'): Promise<void> {

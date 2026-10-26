@@ -45,6 +45,12 @@ import {
   runJob as runContainerJob
 } from './container-jobs.js';
 import { getContainerManager } from './container-manager.js';
+import {
+  extractLocalChartSource,
+  isS57Cell,
+  isS57Update,
+  type LocalChartSource
+} from './local-chart-source.js';
 import { setConversionResult } from './conversion-progress.js';
 import { throwJobFailure } from './job-failure.js';
 import { patchS57Mbtiles, setMbtilesDisplayName } from './mbtiles-metadata.js';
@@ -124,6 +130,27 @@ function findEncFiles(dir: string): string[] {
   };
   scan(dir);
   return files;
+}
+
+/**
+ * Keep one cell of each name. GDAL writes a cell's layers to files named
+ * after the cell, so two copies of a cell (a folder beside its own ZIP, say)
+ * would write the same files; the first copy found is kept.
+ */
+function uniqueCells(cells: readonly string[]): { kept: string[]; duplicates: string[] } {
+  const seen = new Set<string>();
+  const kept: string[] = [];
+  const duplicates: string[] = [];
+  for (const cell of cells) {
+    const name = path.basename(cell).toUpperCase();
+    if (seen.has(name)) {
+      duplicates.push(cell);
+    } else {
+      seen.add(name);
+      kept.push(cell);
+    }
+  }
+  return { kept, duplicates };
 }
 
 function appendLog(chartNumber: string, text: string): void {
@@ -858,7 +885,9 @@ export const _testInternals = {
   wantedMbtilesName,
   stampMbtilesName,
   cellFiles,
-  linkBucketCells
+  linkBucketCells,
+  uniqueCells,
+  stageCells
 };
 
 async function runTippecanoe(
@@ -1270,6 +1299,82 @@ function linkBucketCells(encDir: string, cells: readonly string[], bucketEncDir:
 }
 
 /**
+ * Give each cell the update files found apart from it: GDAL applies only
+ * the updates beside a cell, but a source can keep a base cell and its
+ * updates in different folders or archives. A cell with updates elsewhere
+ * is linked (or, across file systems, copied) into its own folder under
+ * `workDir` together with its own files and those updates, named after the
+ * cell; an update already beside the cell wins over one of the same number
+ * elsewhere. Returns the cells to read, in the same order, and the names of
+ * the cells that were given updates.
+ */
+export function gatherCellUpdates(
+  cells: readonly string[],
+  updates: readonly string[],
+  workDir: string
+): { cells: string[]; withUpdates: string[] } {
+  const byStem = new Map<string, string[]>();
+  for (const update of updates) {
+    const stem = path.basename(update, path.extname(update)).toUpperCase();
+    const list = byStem.get(stem) ?? [];
+    list.push(update);
+    byStem.set(stem, list);
+  }
+  const withUpdates: string[] = [];
+  const result = cells.map((cell, index) => {
+    const dir = path.dirname(cell);
+    const stem = path.basename(cell, path.extname(cell));
+    const elsewhere = (byStem.get(stem.toUpperCase()) ?? []).filter((u) => path.dirname(u) !== dir);
+    if (elsewhere.length === 0) {
+      return cell;
+    }
+    const dest = path.join(workDir, 'cell-updates', String(index));
+    fs.mkdirSync(dest, { recursive: true });
+    const placed = new Set<string>();
+    // The cell's own files first, then the updates found elsewhere, each
+    // under the cell's own name so GDAL finds it.
+    for (const file of [...cellFiles(cell), ...elsewhere.sort()]) {
+      const name = `${stem}${path.extname(file)}`;
+      if (placed.has(name.toUpperCase())) {
+        continue;
+      }
+      placed.add(name.toUpperCase());
+      try {
+        fs.linkSync(file, path.join(dest, name));
+      } catch {
+        fs.copyFileSync(file, path.join(dest, name));
+      }
+    }
+    withUpdates.push(stem);
+    return path.join(dest, `${stem}${path.extname(cell)}`);
+  });
+  return { cells: result, withUpdates };
+}
+
+/**
+ * Link (or, across file systems, copy) the given cells, each with its update
+ * files and named after it, flat into `destDir`, and return the staged
+ * cells in the same order. The cells must have distinct names (uniqueCells).
+ * The helper container then reads them from the scratch dir, which it can
+ * always mount, wherever the cells themselves are.
+ */
+function stageCells(cells: readonly string[], destDir: string): string[] {
+  fs.mkdirSync(destDir, { recursive: true });
+  return cells.map((cell) => {
+    const stem = path.basename(cell, path.extname(cell));
+    for (const file of cellFiles(cell)) {
+      const dest = path.join(destDir, `${stem}${path.extname(file)}`);
+      try {
+        fs.linkSync(file, dest);
+      } catch {
+        fs.copyFileSync(file, dest);
+      }
+    }
+    return path.join(destDir, path.basename(cell));
+  });
+}
+
+/**
  * Fill one bucket's GeoJSON dir: from the caller's `geojsonFor` when it has
  * the output already, otherwise by running GDAL on the bucket's cells,
  * linked into `bucketEncDir` with their update files (linkBucketCells).
@@ -1600,12 +1705,23 @@ export async function processS57Directory(
     setProgress(chartNumber, 'pulling', 'Checking charts-toolbox image...');
     await ensureContainerImage(CHARTS_TOOLBOX_IMAGE, (msg) => debug(msg));
 
-    const encFiles = findEncFiles(encDir);
-    if (encFiles.length === 0) {
+    const { kept: foundCells, duplicates } = uniqueCells(options.cells ?? findEncFiles(encDir));
+    if (foundCells.length === 0) {
       throw new Error('No S-57 ENC files (.000) found in the chart data');
     }
-    debug(`Found ${encFiles.length} ENC files`);
-    appendLog(chartNumber, `Found ${encFiles.length} ENC files`);
+    debug(`Found ${foundCells.length} ENC files`);
+    appendLog(chartNumber, `Found ${foundCells.length} ENC files`);
+    for (const cell of duplicates) {
+      appendLog(chartNumber, `Skipping ${cell}: a cell of the same name is already included`);
+    }
+    // Cells the caller lists can lie outside encDir, in a folder the helper
+    // container may not be able to mount: they are staged in the scratch dir.
+    let cellsDir = encDir;
+    let encFiles = foundCells;
+    if (options.cells) {
+      cellsDir = path.join(tmpDir, 'cells');
+      encFiles = stageCells(foundCells, cellsDir);
+    }
 
     // Choose pipeline. Per-band runs a separate tippecanoe per IHO band
     // and tile-joins the result — each band's drop / coalesce /
@@ -1638,7 +1754,7 @@ export async function processS57Directory(
           `[bands ${grouping.bands.join(', ') || '(none)'}` +
           `${grouping.unbanded.length > 0 ? ` + ${grouping.unbanded.length} unbanded` : ''}]`
       );
-      await runPerBandPipeline(encDir, encFiles, tmpDir, chartNumber, options, outputPath);
+      await runPerBandPipeline(cellsDir, encFiles, tmpDir, chartNumber, options, outputPath);
     } else {
       statusFn('converting', 'Converting S-57 layers to GeoJSON...');
       setProgress(chartNumber, 'converting', `Exporting ${encFiles.length} ENC files...`);
@@ -1657,7 +1773,7 @@ export async function processS57Directory(
       if (options.geojsonFor) {
         await options.geojsonFor(encFiles, geojsonDir);
       } else {
-        await exportAllLayersToGeoJSON(encDir, encFiles, geojsonDir, chartNumber, options.signal);
+        await exportAllLayersToGeoJSON(cellsDir, encFiles, geojsonDir, chartNumber, options.signal);
       }
 
       statusFn('converting', 'Generating vector tiles...');
@@ -1845,6 +1961,62 @@ export async function processS57Zip(
       debug(`Warning: failed to clean up ${tmpDir}`);
     }
   }
+}
+
+/**
+ * Convert the S-57 cells of a folder or ZIP on the server's disk (see
+ * local-chart-source.ts) to one vector MBTiles. Its archives are extracted
+ * under `workDir`, which the caller removes; the source is only read.
+ */
+export async function processS57Local(
+  source: LocalChartSource,
+  workDir: string,
+  chartsDir: string,
+  chartNumber: string,
+  onStatus: StatusCallback | null,
+  options: S57ConversionOptions = {}
+): Promise<S57ConversionResult> {
+  conversionProgress[chartNumber] = {
+    status: 'extracting',
+    message: 'Reading the chart folder...',
+    log: []
+  };
+  let cells: string[];
+  try {
+    const found = await extractLocalChartSource(
+      source,
+      isS57Cell,
+      workDir,
+      (zip, index, count) => {
+        const message = `Extracting ${path.basename(zip)} (${String(index)}/${String(count)})...`;
+        onStatus?.('extracting', message);
+        setProgress(chartNumber, 'extracting', message);
+      },
+      isS57Update
+    );
+    const gathered = gatherCellUpdates(found.files, found.companions, workDir);
+    cells = gathered.cells;
+    if (gathered.withUpdates.length > 0) {
+      appendLog(
+        chartNumber,
+        `Applying updates kept apart from their cells to ${gathered.withUpdates.join(', ')}`
+      );
+    }
+  } catch (err) {
+    setConversionFailed(
+      chartNumber,
+      `Extracting the ZIP files failed: ${err instanceof Error ? err.message : String(err)}`
+    );
+    throw err;
+  }
+  return processS57Directory(
+    source.root,
+    chartsDir,
+    chartNumber,
+    onStatus,
+    { ...options, cells },
+    workDir
+  );
 }
 
 const GSHHG_URL = 'https://www.ngdc.noaa.gov/mgg/shorelines/data/gshhg/latest/gshhg-shp-2.3.7.zip';
