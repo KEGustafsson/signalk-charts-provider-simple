@@ -27,6 +27,8 @@ import {
   pruneStaleInstalls,
   removeInstall,
   removeInstallByFilename,
+  removeInstallsUnderFolder,
+  removeUntrackedInstall,
   renameInstallFilename,
   rollbackInstall,
   setCatalogChangedListener,
@@ -1910,6 +1912,11 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
 
         if (fs.existsSync(fullPath)) {
           const stat = await fs.promises.stat(fullPath);
+          const deletedChartIds = stat.isDirectory()
+            ? (await fs.promises.readdir(fullPath, { recursive: true }))
+                .filter((f) => /\.(mbtiles|pmtiles)$/i.test(f))
+                .map((f) => chartIdFromFilename(path.basename(f)))
+            : [];
           const deletedCatalogIds = stat.isDirectory()
             ? (await findOnlineChartFiles(fullPath)).map((f) => f.catalogId)
             : isOnlineChartFile(fullPath)
@@ -1935,8 +1942,15 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
           // successful conversion, so a chart whose filename was
           // rewritten by catalog title (chartNumber=2 →
           // Port_of_Rotterdam_…mbtiles) still gets its catalog
-          // "Installed" badge cleared.
-          if (!removeInstallByFilename(chartPathParam)) {
+          // "Installed" badge cleared. A folder takes every chart it held: by
+          // tracked path, and records from before paths were tracked by the
+          // ids of its charts and its own name.
+          if (stat.isDirectory()) {
+            removeInstallsUnderFolder(chartPathParam);
+            for (const id of [chartId, ...deletedChartIds]) {
+              removeUntrackedInstall(id);
+            }
+          } else if (!removeInstallByFilename(chartPathParam)) {
             // Fall back to the legacy chartId/chartNumber heuristics
             // for charts installed before setInstallFilename existed.
             removeInstall(chartId);

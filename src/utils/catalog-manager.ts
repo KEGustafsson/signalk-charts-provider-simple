@@ -643,21 +643,24 @@ export function rollbackInstall(chartNumber: string): void {
   saveInstalls();
 }
 
+/** The legacy guess at which install key a chart id (or folder name) belongs to. */
+function legacyKeyMatches(key: string, chartNumber: string): boolean {
+  return (
+    chartNumber === `gshhg-basemap-${key.replace('poly-', '')}` ||
+    chartNumber === `osm-basemap-${key.replace('basemap_', '')}` ||
+    chartNumber.toLowerCase().startsWith(key.toLowerCase()) ||
+    chartNumber.includes(key)
+  );
+}
+
 export function removeInstall(chartNumber: string): void {
   if (installs[chartNumber]) {
     delete installs[chartNumber];
     saveInstalls();
     return;
   }
-  const lower = chartNumber.toLowerCase();
   for (const key of Object.keys(installs)) {
-    const keyLower = key.toLowerCase();
-    if (
-      chartNumber === `gshhg-basemap-${key.replace('poly-', '')}` ||
-      chartNumber === `osm-basemap-${key.replace('basemap_', '')}` ||
-      lower.startsWith(keyLower) ||
-      chartNumber.includes(key)
-    ) {
+    if (legacyKeyMatches(key, chartNumber)) {
       delete installs[key];
       saveInstalls();
       return;
@@ -699,6 +702,78 @@ export function removeInstallByFilename(filename: string): boolean {
   const base = path.basename(filename);
   for (const [key, install] of Object.entries(installs)) {
     if (install.installedFilename && path.basename(install.installedFilename) === base) {
+      delete installs[key];
+      saveInstalls();
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Clear every install record whose tracked file lies inside `folder`
+ * (chartPath-relative). Called when the user deletes a folder, whose charts
+ * the rescan no longer finds but which carry their own filenames, not the
+ * folder's. Returns how many records were removed.
+ */
+export function removeInstallsUnderFolder(folder: string): number {
+  const prefix = `${folder.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')}/`;
+  let removed = 0;
+  for (const [key, install] of Object.entries(installs)) {
+    if (install.installedFilename?.replace(/\\/g, '/').startsWith(prefix)) {
+      delete installs[key];
+      removed++;
+    }
+  }
+  if (removed > 0) {
+    saveInstalls();
+  }
+  return removed;
+}
+
+/**
+ * Whether `chartNumber` is a chart a legacy record keyed `key` produced: a
+ * basemap's chart id, or the key followed by a separator (`12345_1` from a
+ * KAP of chart `12345`). The separator keeps chart `20` from matching record
+ * `2`.
+ */
+function untrackedKeyMatches(key: string, chartNumber: string): boolean {
+  if (
+    chartNumber === `gshhg-basemap-${key.replace('poly-', '')}` ||
+    chartNumber === `osm-basemap-${key.replace('basemap_', '')}`
+  ) {
+    return true;
+  }
+  return (
+    chartNumber.length > key.length &&
+    chartNumber.toLowerCase().startsWith(key.toLowerCase()) &&
+    !/[a-z0-9]/i.test(chartNumber[key.length])
+  );
+}
+
+function isUntracked(install: CatalogInstall): boolean {
+  return !install.installedFilename && !('previousVersion' in install);
+}
+
+/**
+ * Clear the settled install record that `chartNumber` names, but only one
+ * with no tracked filename: those predate setInstallFilename, so a folder
+ * delete cannot find them by path. Records with a filename or still in
+ * flight are left to their own lookups. A record keyed by `chartNumber`
+ * itself decides alone; otherwise the legacy chart-id forms are matched.
+ */
+export function removeUntrackedInstall(chartNumber: string): boolean {
+  const exact = installs[chartNumber];
+  if (exact) {
+    if (!isUntracked(exact)) {
+      return false;
+    }
+    delete installs[chartNumber];
+    saveInstalls();
+    return true;
+  }
+  for (const [key, install] of Object.entries(installs)) {
+    if (isUntracked(install) && untrackedKeyMatches(key, chartNumber)) {
       delete installs[key];
       saveInstalls();
       return true;
