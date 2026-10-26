@@ -24,7 +24,8 @@ const {
   TIPPECANOE_LAYER_MANIFEST,
   surfaceExportErrorsIfEmpty,
   wantedMbtilesName,
-  stampMbtilesName
+  stampMbtilesName,
+  linkBucketCells
 } = _testInternals;
 
 interface GeoJSONFeature {
@@ -952,5 +953,77 @@ describe('per-feature tippecanoe.minzoom stamping (band-aware consolidation)', (
     assert.strictEqual(out.tippecanoe?.minzoom, 12, 'minzoom added');
     assert.strictEqual(out.tippecanoe?.maxzoom, 18, 'pre-existing maxzoom preserved');
     assert.strictEqual(out.tippecanoe?.layer, 'override', 'pre-existing layer preserved');
+  });
+});
+
+describe('linkBucketCells (the cells a per-band export sees)', () => {
+  let tmp: string;
+
+  before(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sk-charts-bucket-'));
+  });
+
+  after(() => {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const contents = (dir: string): Record<string, string> =>
+    Object.fromEntries(
+      fs
+        .readdirSync(dir)
+        .sort()
+        .map((f) => [f, fs.readFileSync(path.join(dir, f), 'utf8')])
+    );
+
+  it('links each cell with its update files, and nothing else', () => {
+    const enc = path.join(tmp, 'enc');
+    const cellDir = path.join(enc, 'ENC_ROOT', 'US5MA1SK');
+    fs.mkdirSync(cellDir, { recursive: true });
+    for (const name of ['US5MA1SK.000', 'US5MA1SK.001', 'US5MA1SK.002', 'US5MA1SK.TXT']) {
+      fs.writeFileSync(path.join(cellDir, name), name);
+    }
+    fs.writeFileSync(path.join(cellDir, 'US5MA2SK.001'), 'another cell');
+    const bucket = path.join(tmp, 'bucket');
+    linkBucketCells(enc, [path.join(cellDir, 'US5MA1SK.000')], bucket);
+    assert.deepStrictEqual(contents(path.join(bucket, 'ENC_ROOT', 'US5MA1SK')), {
+      'US5MA1SK.000': 'US5MA1SK.000',
+      'US5MA1SK.001': 'US5MA1SK.001',
+      'US5MA1SK.002': 'US5MA1SK.002'
+    });
+  });
+
+  it("links an update named in another case under the cell's name", () => {
+    const enc = path.join(tmp, 'enc-case');
+    fs.mkdirSync(enc, { recursive: true });
+    fs.writeFileSync(path.join(enc, 'US5MA3SK.000'), 'base');
+    fs.writeFileSync(path.join(enc, 'us5ma3sk.001'), 'lower-case update');
+    const bucket = path.join(tmp, 'bucket-case');
+    linkBucketCells(enc, [path.join(enc, 'US5MA3SK.000')], bucket);
+    assert.deepStrictEqual(contents(bucket), {
+      'US5MA3SK.000': 'base',
+      'US5MA3SK.001': 'lower-case update'
+    });
+  });
+
+  it('keeps the update named like the cell when another differs only in case', (t) => {
+    const enc = path.join(tmp, 'enc-both');
+    fs.mkdirSync(enc, { recursive: true });
+    fs.writeFileSync(path.join(enc, 'us5ma4sk.001'), 'lower-case update');
+    if (fs.existsSync(path.join(enc, 'US5MA4SK.001'))) {
+      t.skip('the file system ignores case');
+      return;
+    }
+    fs.writeFileSync(path.join(enc, 'US5MA4SK.000'), 'base');
+    fs.writeFileSync(path.join(enc, 'US5MA4SK.001'), 'exact update');
+    fs.writeFileSync(path.join(enc, 'us5ma4sk.002'), 'second');
+    fs.writeFileSync(path.join(enc, 'Us5Ma4Sk.002'), 'second, other case');
+    const bucket = path.join(tmp, 'bucket-both');
+    linkBucketCells(enc, [path.join(enc, 'US5MA4SK.000')], bucket);
+    assert.deepStrictEqual(contents(bucket), {
+      'US5MA4SK.000': 'base',
+      'US5MA4SK.001': 'exact update',
+      // Neither is named like the cell: the first in sorted order.
+      'US5MA4SK.002': 'second, other case'
+    });
   });
 });

@@ -2,6 +2,7 @@ import fs from 'fs';
 import https from 'https';
 import { DatabaseSync } from 'node:sqlite';
 import path from 'path';
+import { pipeline } from 'stream/promises';
 import unzipper from 'unzipper';
 import zlib from 'zlib';
 import type {
@@ -856,7 +857,9 @@ export const _testInternals = {
   TIPPECANOE_LAYER_MANIFEST,
   surfaceExportErrorsIfEmpty,
   wantedMbtilesName,
-  stampMbtilesName
+  stampMbtilesName,
+  cellFiles,
+  linkBucketCells
 };
 
 async function runTippecanoe(
@@ -1200,17 +1203,77 @@ async function runTileJoin(
   onPercent?.(100);
 }
 
+// An S-57 update file: the cell's name with a three-digit extension past 000.
+const UPDATE_EXTENSION = /^\.\d{3}$/;
+
 /**
- * Fill one bucket's GeoJSON dir: from the caller's `geojsonFor` when it has
- * the output already, otherwise by running GDAL on the bucket's cells.
- *
- * GDAL gets hardlinks of the cells in a bucket-scoped dir, so the export
- * script (which walks `find <inDir> -name '*.000'`) only sees this bucket.
+ * The files GDAL reads for a cell: its `.000` and the update files beside it
+ * (`.001`, `.002`, …), which the S-57 driver applies when it opens the cell.
+ * An update's name is matched without regard to case, as producers differ;
+ * whoever places these for GDAL names each after the cell. When two files
+ * hold the same update in different case, the one named exactly like the
+ * cell is kept, else the first in sorted order.
+ */
+function cellFiles(cell: string): string[] {
+  const dir = path.dirname(cell);
+  const stem = path.basename(cell, path.extname(cell));
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [cell];
+  }
+  const exactFirst = (name: string): number =>
+    path.basename(name, path.extname(name)) === stem ? 0 : 1;
+  names.sort((a, b) => exactFirst(a) - exactFirst(b) || (a < b ? -1 : a > b ? 1 : 0));
+  const updates = new Map<string, string>();
+  for (const name of names) {
+    const ext = path.extname(name);
+    if (
+      !updates.has(ext) &&
+      path.basename(name, ext).toUpperCase() === stem.toUpperCase() &&
+      UPDATE_EXTENSION.test(ext) &&
+      ext !== '.000' &&
+      fs.statSync(path.join(dir, name)).isFile()
+    ) {
+      updates.set(ext, path.join(dir, name));
+    }
+  }
+  return [cell, ...updates.values()];
+}
+
+/**
+ * Hardlink a bucket's cells, each with its update files, into a
+ * bucket-scoped dir, so the export script (which walks
+ * `find <inDir> -name '*.000'`) only sees this bucket. Each file is named
+ * after its cell: GDAL looks for a cell's updates by the cell's own name.
  * Hardlinks keep IO cheap (no data copy) and — unlike symlinks — survive
  * being bind-mounted into a container: a symlink target pointing at an
  * absolute host path doesn't exist inside the container's filesystem
  * namespace, so `find` would silently miss every cell. Copy is the
  * fallback for the rare case where the scratch dir spans filesystems.
+ */
+function linkBucketCells(encDir: string, cells: readonly string[], bucketEncDir: string): void {
+  fs.mkdirSync(bucketEncDir, { recursive: true });
+  for (const cellPath of cells) {
+    const linkDir = path.join(bucketEncDir, path.dirname(path.relative(encDir, cellPath)));
+    fs.mkdirSync(linkDir, { recursive: true });
+    const stem = path.basename(cellPath, path.extname(cellPath));
+    for (const file of cellFiles(cellPath)) {
+      const linkPath = path.join(linkDir, `${stem}${path.extname(file)}`);
+      try {
+        fs.linkSync(file, linkPath);
+      } catch {
+        fs.copyFileSync(file, linkPath);
+      }
+    }
+  }
+}
+
+/**
+ * Fill one bucket's GeoJSON dir: from the caller's `geojsonFor` when it has
+ * the output already, otherwise by running GDAL on the bucket's cells,
+ * linked into `bucketEncDir` with their update files (linkBucketCells).
  */
 async function geojsonForBucket(
   encDir: string,
@@ -1224,17 +1287,7 @@ async function geojsonForBucket(
     await options.geojsonFor(cells, bucketGeojsonDir);
     return;
   }
-  fs.mkdirSync(bucketEncDir, { recursive: true });
-  for (const cellPath of cells) {
-    const cellRel = path.relative(encDir, cellPath);
-    const linkPath = path.join(bucketEncDir, cellRel);
-    fs.mkdirSync(path.dirname(linkPath), { recursive: true });
-    try {
-      fs.linkSync(cellPath, linkPath);
-    } catch {
-      fs.copyFileSync(cellPath, linkPath);
-    }
-  }
+  linkBucketCells(encDir, cells, bucketEncDir);
   await exportAllLayersToGeoJSON(
     bucketEncDir,
     cells,
@@ -1797,6 +1850,60 @@ export async function processS57Zip(
 
 const GSHHG_URL = 'https://www.ngdc.noaa.gov/mgg/shorelines/data/gshhg/latest/gshhg-shp-2.3.7.zip';
 
+const DOWNLOAD_STALL_MS = 60_000;
+
+/**
+ * Download `url` to `dest` over https, following up to five redirects.
+ * Rejects on an HTTP error, a bad redirect, a dropped connection, or a
+ * connection silent for DOWNLOAD_STALL_MS, so the conversion fails instead
+ * of waiting forever.
+ */
+async function downloadFile(
+  url: string,
+  dest: string,
+  onProgress: (downloaded: number, total: number) => void
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const request = (target: string, redirects: number): void => {
+      const req = https.get(target, (response) => {
+        const status = response.statusCode ?? 0;
+        const location = response.headers.location;
+        if (status >= 300 && status < 400 && location && redirects < 5) {
+          response.resume();
+          // A bad Location, or one off https, throws here, inside the
+          // response listener; fail the download rather than the process.
+          try {
+            request(new URL(location, target).toString(), redirects + 1);
+          } catch (err) {
+            reject(err instanceof Error ? err : new Error(String(err)));
+          }
+          return;
+        }
+        if (status !== 200) {
+          response.resume();
+          reject(new Error(`NOAA returned HTTP ${status}`));
+          return;
+        }
+        const total = parseInt(response.headers['content-length'] ?? '0');
+        let downloaded = 0;
+        response.on('data', (chunk: Buffer) => {
+          downloaded += chunk.length;
+          onProgress(downloaded, total);
+        });
+        // pipeline settles on an error of either stream, so a dropped
+        // connection fails the download instead of leaving it pending.
+        pipeline(response, fs.createWriteStream(dest)).then(resolve, reject);
+      });
+      // A connection silent this long has stalled; fail it.
+      req.setTimeout(DOWNLOAD_STALL_MS, () => {
+        req.destroy(new Error('Download stalled'));
+      });
+      req.on('error', reject);
+    };
+    request(url, 0);
+  });
+}
+
 export async function processGshhg(
   tmpDir: string,
   chartsDir: string,
@@ -1826,6 +1933,8 @@ export async function processGshhg(
   }
   setProgress(chartNumber, 'pulling', 'Checking charts-toolbox image...');
   await ensureContainerImage(CHARTS_TOOLBOX_IMAGE, (msg) => debug(msg));
+  // gdal_rasterize writes the world raster into tmpDir as the toolbox user.
+  makeContainerWritable(tmpDir);
 
   setProgress(chartNumber, 'converting', 'Downloading GSHHG shapefiles from NOAA...');
   appendLog(
@@ -1834,49 +1943,17 @@ export async function processGshhg(
   );
 
   const zipPath = path.join(tmpDir, 'gshhg-shp.zip');
-  await new Promise<void>((resolve, reject) => {
-    const file = fs.createWriteStream(zipPath);
-    https
-      .get(GSHHG_URL, (response) => {
-        if (response.statusCode === 301 || response.statusCode === 302) {
-          const loc = response.headers.location;
-          if (loc) {
-            https
-              .get(loc, (r2) => {
-                r2.pipe(file);
-                file.on('finish', () => {
-                  file.close(() => resolve());
-                });
-              })
-              .on('error', reject);
-            return;
-          }
-        }
-        if (response.statusCode !== 200) {
-          reject(new Error(`NOAA returned HTTP ${response.statusCode}`));
-          return;
-        }
-        const totalBytes = parseInt(response.headers['content-length'] ?? '0');
-        let downloadedBytes = 0;
-        response.on('data', (chunk: Buffer) => {
-          downloadedBytes += chunk.length;
-          if (totalBytes > 0) {
-            const pct = Math.round((downloadedBytes / totalBytes) * 100);
-            const mb = (downloadedBytes / (1024 * 1024)).toFixed(1);
-            const totalMb = (totalBytes / (1024 * 1024)).toFixed(0);
-            setProgress(
-              chartNumber,
-              'converting',
-              `Downloading shapefiles: ${mb}/${totalMb} MB (${pct}%)`
-            );
-          }
-        });
-        response.pipe(file);
-        file.on('finish', () => {
-          file.close(() => resolve());
-        });
-      })
-      .on('error', reject);
+  await downloadFile(GSHHG_URL, zipPath, (downloaded, total) => {
+    if (total > 0) {
+      const pct = Math.round((downloaded / total) * 100);
+      const mb = (downloaded / (1024 * 1024)).toFixed(1);
+      const totalMb = (total / (1024 * 1024)).toFixed(0);
+      setProgress(
+        chartNumber,
+        'converting',
+        `Downloading shapefiles: ${mb}/${totalMb} MB (${pct}%)`
+      );
+    }
   });
 
   appendLog(chartNumber, 'Download complete. Extracting shapefiles...');
@@ -1962,6 +2039,12 @@ export async function processGshhg(
       'GTiff',
       '-co',
       'COMPRESS=LZW',
+      // From the intermediate resolution up the raster is past 4 GB
+      // uncompressed, and even compressed may outgrow a classic TIFF; GDAL
+      // only switches to BigTIFF unasked when it can tell an uncompressed
+      // file needs it.
+      '-co',
+      'BIGTIFF=IF_SAFER',
       `${inputPrefix}/GSHHS_shp/${resolution}/GSHHS_${resolution}_L1.shp`,
       `${workPrefix}/world.tif`
     ],
@@ -2237,6 +2320,10 @@ export async function processShpBasemap(
         'GTiff',
         '-co',
         'COMPRESS=LZW',
+        // The high and full rasters are past 4 GB uncompressed, and even
+        // compressed may outgrow a classic TIFF (see processGshhg).
+        '-co',
+        'BIGTIFF=IF_SAFER',
         `${inputPrefix}/${shpName}`,
         `${workPrefix}/world.tif`
       ],

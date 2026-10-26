@@ -67,7 +67,7 @@ If `signalk-container` is missing, the plugin still loads and **serves charts** 
 
 ### Hot-apply config and the path marker
 
-`start()` is called fresh on every config save (Signal K restarts the plugin, not the whole server). The startup sweep of the chart folder (invalid `.mbtiles`, orphaned journal and WAL files) starts `SWEEP_DELAY_MS` after the charts load, is cancelled by `stop()`, and lists the folder before validating it, so a chart an upload or conversion places meanwhile is never deleted. `utils/path-marker.ts` writes `.charts-provider-marker.json` into the chart path on each start, recording plugin version, container hints, and effective UID — useful when diagnosing host-vs-container path mismatches.
+`start()` is called fresh on every config save (Signal K restarts the plugin, not the whole server). Downloads and conversions the previous start began keep running, so the leftover work folders in the data dir are swept only at a process's first start (`utils/temp-dirs.ts`). The startup sweep of the chart folder (invalid `.mbtiles`, orphaned journal and WAL files) starts `SWEEP_DELAY_MS` after the charts load, is cancelled by `stop()`, and lists the folder before validating it, so a chart an upload or conversion places meanwhile is never deleted. `utils/path-marker.ts` writes `.charts-provider-marker.json` into the chart path on each start, recording plugin version, container hints, and effective UID — useful when diagnosing host-vs-container path mismatches.
 
 ### Web UI
 

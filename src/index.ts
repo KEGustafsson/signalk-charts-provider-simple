@@ -17,6 +17,10 @@ import {
   getCatalogsWithInstalledCharts,
   getConvertingCharts,
   getConvertingCount,
+  getConversionSlotsInUse,
+  isConversionNameInUse,
+  releasePendingConversion,
+  reservePendingConversion,
   getInstalledCatalogCharts,
   getOnlineCatalogChart,
   getOnlineCatalogCharts,
@@ -27,6 +31,8 @@ import {
   pruneStaleInstalls,
   removeInstall,
   removeInstallByFilename,
+  removeInstallsUnderFolder,
+  removeUntrackedInstall,
   renameInstallFilename,
   rollbackInstall,
   setCatalogChangedListener,
@@ -152,6 +158,7 @@ import {
   refreshEncIndexIfStale
 } from './utils/enc-index-manager.js';
 import { resolveChartSet } from './utils/enc-chart-set.js';
+import { sweepLeftoverTempDirs } from './utils/temp-dirs.js';
 import {
   cachedGeojsonFor,
   cellsDir,
@@ -238,6 +245,15 @@ const SWEEP_DELAY_MS = 30_000;
 // rendering for non-admin sessions (issue #99). The v1 api namespace is
 // only http_authorize-gated, so any authenticated user can read tiles.
 const chartTilesPath = `/signalk/v1/api/resources/charts`;
+
+// A download's conversion slot is released when the download ends. One that
+// completed has started converting by then: its listener marks the chart
+// converting before its first await, within this same event.
+for (const event of ['job-completed', 'job-failed', 'job-cancelled'] as const) {
+  downloadManager.on(event, (job: DownloadJob) => {
+    releasePendingConversion(job.id);
+  });
+}
 
 const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
   let chartProviders: Record<string, ChartProvider> = {};
@@ -820,16 +836,9 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     };
     initLandIndex(dataDir, landIndexOptions);
 
-    const tempDirPattern =
-      /^(s57-download-|rnc-download-|pilot-download-|shp-download-|gshhg-|convert-upload-|custom-catalog-)\d+$/;
     try {
-      const dataDirEntries = fs.readdirSync(dataDir, { withFileTypes: true });
-      for (const entry of dataDirEntries) {
-        if (entry.isDirectory() && tempDirPattern.test(entry.name)) {
-          const fullPath = path.join(dataDir, entry.name);
-          console.log(`[charts-provider] Removing leftover temp directory: ${entry.name}`);
-          cleanupDir(fullPath);
-        }
+      for (const name of sweepLeftoverTempDirs(dataDir)) {
+        console.log(`[charts-provider] Removed leftover temp directory: ${name}`);
       }
     } catch (e) {
       app.debug(
@@ -1942,6 +1951,11 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
 
         if (fs.existsSync(fullPath)) {
           const stat = await fs.promises.stat(fullPath);
+          const deletedChartIds = stat.isDirectory()
+            ? (await fs.promises.readdir(fullPath, { recursive: true }))
+                .filter((f) => /\.(mbtiles|pmtiles)$/i.test(f))
+                .map((f) => chartIdFromFilename(path.basename(f)))
+            : [];
           const deletedCatalogIds = stat.isDirectory()
             ? (await findOnlineChartFiles(fullPath)).map((f) => f.catalogId)
             : isOnlineChartFile(fullPath)
@@ -1967,8 +1981,15 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
           // successful conversion, so a chart whose filename was
           // rewritten by catalog title (chartNumber=2 →
           // Port_of_Rotterdam_…mbtiles) still gets its catalog
-          // "Installed" badge cleared.
-          if (!removeInstallByFilename(chartPathParam)) {
+          // "Installed" badge cleared. A folder takes every chart it held: by
+          // tracked path, and records from before paths were tracked by the
+          // ids of its charts and its own name.
+          if (stat.isDirectory()) {
+            removeInstallsUnderFolder(chartPathParam);
+            for (const id of [chartId, ...deletedChartIds]) {
+              removeUntrackedInstall(id);
+            }
+          } else if (!removeInstallByFilename(chartPathParam)) {
             // Fall back to the legacy chartId/chartNumber heuristics
             // for charts installed before setInstallFilename existed.
             removeInstall(chartId);
@@ -3928,8 +3949,21 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
             return;
           }
 
+          const chartNumber = path
+            .basename(uploadedFileName, '.zip')
+            .replace(/[^a-zA-Z0-9_-]/g, '_');
+          // The converting state is keyed by chart number: a second conversion
+          // of one would share the first's slot.
+          if (isConversionNameInUse(chartNumber)) {
+            cleanupDir(tmpDir);
+            res.status(409).json({
+              success: false,
+              error: `${uploadedFileName} is already being converted. Please wait for it to finish.`
+            });
+            return;
+          }
           const budgetMax = getCpuBudget().maxConcurrentConversions;
-          if (getConvertingCount() >= budgetMax) {
+          if (getConversionSlotsInUse() >= budgetMax) {
             cleanupDir(tmpDir);
             res.status(429).json({
               success: false,
@@ -3937,10 +3971,6 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
             });
             return;
           }
-
-          const chartNumber = path
-            .basename(uploadedFileName, '.zip')
-            .replace(/[^a-zA-Z0-9_-]/g, '_');
 
           // Order matters: defer the success response until
           // makeQuarantineDir has actually returned. A permission /
@@ -4106,8 +4136,17 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
           }
         }
 
+        // The converting state is keyed by chart number: a second conversion
+        // of one would share the first's slot.
+        if (needsRuntime && isConversionNameInUse(chartNumber)) {
+          res.status(409).json({
+            success: false,
+            error: `${chartNumber} is already being converted. Please wait for it to finish.`
+          });
+          return;
+        }
         const budgetMax = getCpuBudget().maxConcurrentConversions;
-        if (needsRuntime && getConvertingCount() >= budgetMax) {
+        if (needsRuntime && getConversionSlotsInUse() >= budgetMax) {
           res.status(429).json({
             success: false,
             error: `Too many conversions running (max ${budgetMax}). Please wait for a conversion to finish.`
@@ -4444,7 +4483,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         return;
       }
       const budgetMax = getCpuBudget().maxConcurrentConversions;
-      if (getConvertingCount() >= budgetMax) {
+      if (getConversionSlotsInUse() >= budgetMax) {
         res.status(429).json({
           success: false,
           error: `Too many conversions running (max ${budgetMax}). Please wait for one to finish.`
@@ -4541,6 +4580,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     fs.mkdirSync(tmpDownloadDir, { recursive: true });
 
     const jobId = downloadManager.createJob(url, tmpDownloadDir, chartNumber, { saveRaw: true });
+    reservePendingConversion(jobId, chartNumber);
 
     trackInstall(chartNumber, catalogFile, zipfileDatetime ?? '', url);
     // Don't flag converting yet — the download still has to finish.
@@ -4663,6 +4703,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     fs.mkdirSync(tmpDownloadDir, { recursive: true });
 
     const jobId = downloadManager.createJob(url, tmpDownloadDir, chartNumber, { saveRaw: true });
+    reservePendingConversion(jobId, chartNumber);
 
     trackInstall(chartNumber, catalogFile, zipfileDatetime ?? '', url);
     // Set converting state inside the listener once the download has
@@ -4777,6 +4818,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     fs.mkdirSync(tmpDownloadDir, { recursive: true });
 
     const jobId = downloadManager.createJob(url, tmpDownloadDir, chartNumber, { saveRaw: true });
+    reservePendingConversion(jobId, chartNumber);
 
     trackInstall(chartNumber, catalogFile, zipfileDatetime ?? '', url);
     // Set converting state inside the listener once the download has
@@ -4822,6 +4864,15 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         for (const mbtilesFile of result.mbtilesFiles) {
           const relativePath = path.relative(chartPath, path.join(targetDir, mbtilesFile));
           setChartEnabled(relativePath, true);
+        }
+        // Commits the install (a record left in flight is rolled back on the
+        // next start) and lets the delete flow find it, as for RNC charts.
+        const firstFile = result.mbtilesFiles[0];
+        if (firstFile) {
+          setInstallFilename(
+            chartNumber,
+            path.relative(chartPath, path.join(targetDir, firstFile))
+          );
         }
         await refreshChartProviders();
         for (const mbtilesFile of result.mbtilesFiles) {
@@ -4878,6 +4929,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     fs.mkdirSync(tmpDownloadDir, { recursive: true });
 
     const jobId = downloadManager.createJob(url, tmpDownloadDir, chartNumber, { saveRaw: true });
+    reservePendingConversion(jobId, chartNumber);
 
     trackInstall(chartNumber, catalogFile, zipfileDatetime ?? '', url);
     // Set converting state inside the listener once the download has
@@ -4922,6 +4974,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
 
         const relativePath = path.relative(chartPath, path.join(targetDir, result.mbtilesFile));
         setChartEnabled(relativePath, true);
+        setInstallFilename(chartNumber, relativePath);
         await refreshChartProviders();
 
         const chartId = result.mbtilesFile.replace(/\.mbtiles$/, '');
@@ -4968,7 +5021,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     zipfileDatetime: string | undefined,
     url: string,
     targetDir: string,
-    _chartPath: string
+    chartPath: string
   ): void {
     const resolution = chartNumber.replace('poly-', '');
 
@@ -4996,6 +5049,10 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
 
         setConvertingState(chartNumber, false);
         cleanupQuarantineDir(quarantineDir);
+        setInstallFilename(
+          chartNumber,
+          path.relative(chartPath, path.join(targetDir, result.mbtilesFile))
+        );
         await refreshChartProviders();
 
         const chartId = `gshhg-basemap-${resolution}`;
@@ -5152,8 +5209,11 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         if (convertingFlagged) {
           return;
         }
+        if (isConversionNameInUse(id)) {
+          throw new Error(`${id} is already being converted. Please retry when it finishes.`);
+        }
         const convertBudgetMax = getCpuBudget().maxConcurrentConversions;
-        if (getConvertingCount() >= convertBudgetMax) {
+        if (getConversionSlotsInUse() >= convertBudgetMax) {
           throw new Error(
             `Too many conversions running (max ${convertBudgetMax}). Please retry when one finishes.`
           );
