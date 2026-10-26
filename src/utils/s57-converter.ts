@@ -2,6 +2,7 @@ import fs from 'fs';
 import https from 'https';
 import { DatabaseSync } from 'node:sqlite';
 import path from 'path';
+import { pipeline } from 'stream/promises';
 import unzipper from 'unzipper';
 import zlib from 'zlib';
 import type {
@@ -1797,6 +1798,60 @@ export async function processS57Zip(
 
 const GSHHG_URL = 'https://www.ngdc.noaa.gov/mgg/shorelines/data/gshhg/latest/gshhg-shp-2.3.7.zip';
 
+const DOWNLOAD_STALL_MS = 60_000;
+
+/**
+ * Download `url` to `dest` over https, following up to five redirects.
+ * Rejects on an HTTP error, a bad redirect, a dropped connection, or a
+ * connection silent for DOWNLOAD_STALL_MS, so the conversion fails instead
+ * of waiting forever.
+ */
+async function downloadFile(
+  url: string,
+  dest: string,
+  onProgress: (downloaded: number, total: number) => void
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const request = (target: string, redirects: number): void => {
+      const req = https.get(target, (response) => {
+        const status = response.statusCode ?? 0;
+        const location = response.headers.location;
+        if (status >= 300 && status < 400 && location && redirects < 5) {
+          response.resume();
+          // A bad Location, or one off https, throws here, inside the
+          // response listener; fail the download rather than the process.
+          try {
+            request(new URL(location, target).toString(), redirects + 1);
+          } catch (err) {
+            reject(err instanceof Error ? err : new Error(String(err)));
+          }
+          return;
+        }
+        if (status !== 200) {
+          response.resume();
+          reject(new Error(`NOAA returned HTTP ${status}`));
+          return;
+        }
+        const total = parseInt(response.headers['content-length'] ?? '0');
+        let downloaded = 0;
+        response.on('data', (chunk: Buffer) => {
+          downloaded += chunk.length;
+          onProgress(downloaded, total);
+        });
+        // pipeline settles on an error of either stream, so a dropped
+        // connection fails the download instead of leaving it pending.
+        pipeline(response, fs.createWriteStream(dest)).then(resolve, reject);
+      });
+      // A connection silent this long has stalled; fail it.
+      req.setTimeout(DOWNLOAD_STALL_MS, () => {
+        req.destroy(new Error('Download stalled'));
+      });
+      req.on('error', reject);
+    };
+    request(url, 0);
+  });
+}
+
 export async function processGshhg(
   tmpDir: string,
   chartsDir: string,
@@ -1826,6 +1881,8 @@ export async function processGshhg(
   }
   setProgress(chartNumber, 'pulling', 'Checking charts-toolbox image...');
   await ensureContainerImage(CHARTS_TOOLBOX_IMAGE, (msg) => debug(msg));
+  // gdal_rasterize writes the world raster into tmpDir as the toolbox user.
+  makeContainerWritable(tmpDir);
 
   setProgress(chartNumber, 'converting', 'Downloading GSHHG shapefiles from NOAA...');
   appendLog(
@@ -1834,49 +1891,17 @@ export async function processGshhg(
   );
 
   const zipPath = path.join(tmpDir, 'gshhg-shp.zip');
-  await new Promise<void>((resolve, reject) => {
-    const file = fs.createWriteStream(zipPath);
-    https
-      .get(GSHHG_URL, (response) => {
-        if (response.statusCode === 301 || response.statusCode === 302) {
-          const loc = response.headers.location;
-          if (loc) {
-            https
-              .get(loc, (r2) => {
-                r2.pipe(file);
-                file.on('finish', () => {
-                  file.close(() => resolve());
-                });
-              })
-              .on('error', reject);
-            return;
-          }
-        }
-        if (response.statusCode !== 200) {
-          reject(new Error(`NOAA returned HTTP ${response.statusCode}`));
-          return;
-        }
-        const totalBytes = parseInt(response.headers['content-length'] ?? '0');
-        let downloadedBytes = 0;
-        response.on('data', (chunk: Buffer) => {
-          downloadedBytes += chunk.length;
-          if (totalBytes > 0) {
-            const pct = Math.round((downloadedBytes / totalBytes) * 100);
-            const mb = (downloadedBytes / (1024 * 1024)).toFixed(1);
-            const totalMb = (totalBytes / (1024 * 1024)).toFixed(0);
-            setProgress(
-              chartNumber,
-              'converting',
-              `Downloading shapefiles: ${mb}/${totalMb} MB (${pct}%)`
-            );
-          }
-        });
-        response.pipe(file);
-        file.on('finish', () => {
-          file.close(() => resolve());
-        });
-      })
-      .on('error', reject);
+  await downloadFile(GSHHG_URL, zipPath, (downloaded, total) => {
+    if (total > 0) {
+      const pct = Math.round((downloaded / total) * 100);
+      const mb = (downloaded / (1024 * 1024)).toFixed(1);
+      const totalMb = (total / (1024 * 1024)).toFixed(0);
+      setProgress(
+        chartNumber,
+        'converting',
+        `Downloading shapefiles: ${mb}/${totalMb} MB (${pct}%)`
+      );
+    }
   });
 
   appendLog(chartNumber, 'Download complete. Extracting shapefiles...');
@@ -1962,6 +1987,12 @@ export async function processGshhg(
       'GTiff',
       '-co',
       'COMPRESS=LZW',
+      // From the intermediate resolution up the raster is past 4 GB
+      // uncompressed, and even compressed may outgrow a classic TIFF; GDAL
+      // only switches to BigTIFF unasked when it can tell an uncompressed
+      // file needs it.
+      '-co',
+      'BIGTIFF=IF_SAFER',
       `${inputPrefix}/GSHHS_shp/${resolution}/GSHHS_${resolution}_L1.shp`,
       `${workPrefix}/world.tif`
     ],
@@ -2237,6 +2268,10 @@ export async function processShpBasemap(
         'GTiff',
         '-co',
         'COMPRESS=LZW',
+        // The high and full rasters are past 4 GB uncompressed, and even
+        // compressed may outgrow a classic TIFF (see processGshhg).
+        '-co',
+        'BIGTIFF=IF_SAFER',
         `${inputPrefix}/${shpName}`,
         `${workPrefix}/world.tif`
       ],
