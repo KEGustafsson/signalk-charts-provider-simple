@@ -27,7 +27,12 @@ import {
   pruneStaleInstalls,
   refreshCatalog,
   refreshCatalogIfStale,
-  setCatalogChangedListener
+  setCatalogChangedListener,
+  setConvertingState,
+  getConversionSlotsInUse,
+  reservePendingConversion,
+  releasePendingConversion,
+  isConversionNameInUse
 } from '../dist/utils/catalog-manager.js';
 import type { CatalogInstall } from '../dist/types.js';
 
@@ -1208,6 +1213,42 @@ describe('CatalogManager', () => {
       await initCatalogManagerOffline();
       assert.ok(!fs.existsSync(path.join(cacheDir, '_registry.json')));
       assert.ok(!fs.existsSync(path.join(cacheDir, 'NOAA_MBTiles_Catalog.json')));
+    });
+  });
+
+  describe('conversion slots', () => {
+    it('counts downloads that will convert alongside running conversions', () => {
+      const before = getConversionSlotsInUse();
+      reservePendingConversion('dl_a', 'chart-a');
+      reservePendingConversion('dl_b', 'chart-b');
+      setConvertingState('slot-chart', true);
+      assert.strictEqual(getConversionSlotsInUse(), before + 3);
+
+      // A finished download releases its slot as its conversion takes one.
+      releasePendingConversion('dl_a');
+      assert.strictEqual(getConversionSlotsInUse(), before + 2);
+
+      // Releasing twice, or a job that never reserved, changes nothing.
+      releasePendingConversion('dl_a');
+      releasePendingConversion('dl_unknown');
+      assert.strictEqual(getConversionSlotsInUse(), before + 2);
+
+      releasePendingConversion('dl_b');
+      setConvertingState('slot-chart', false);
+      assert.strictEqual(getConversionSlotsInUse(), before);
+    });
+
+    it('knows a chart number taken by a running conversion or a download', () => {
+      assert.strictEqual(isConversionNameInUse('name-chart'), false);
+      reservePendingConversion('dl_name', 'name-chart');
+      assert.strictEqual(isConversionNameInUse('name-chart'), true);
+      releasePendingConversion('dl_name');
+      assert.strictEqual(isConversionNameInUse('name-chart'), false);
+      setConvertingState('name-chart', true);
+      assert.strictEqual(isConversionNameInUse('name-chart'), true);
+      setConvertingState('name-chart', false);
+      // Only the chart's own entry counts, not an inherited member.
+      assert.strictEqual(isConversionNameInUse('constructor'), false);
     });
   });
 });

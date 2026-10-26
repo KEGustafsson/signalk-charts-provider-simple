@@ -51,7 +51,7 @@ Chart conversion (S-57 ENC, BSB raster, basemaps) is the only CPU-heavy thing th
 | `half` (default) | `cpus/2` concurrent jobs, each tippecanoe gets `cpus / max-jobs` threads (typically ~2), `ogr2ogr` parallelizes to the same per-job ceiling | Balanced — leaves half the box for everything else. Matches the behaviour of plugin versions before 1.10 |
 | `all` | One full-throttle job using every core in both the GDAL export and tippecanoe stages; multi-bundle uploads queue serially | Dedicated chart-prep box, or when you just want a chart set to finish as fast as possible |
 
-The setting hot-applies — change it in the plugin config and Signal K will restart the plugin automatically; no server restart needed. In-flight conversions keep their already-spawned threads; the next conversion picks up the new budget.
+A catalog download that converts its chart holds its slot from the moment it is requested, so downloads started together cannot go on to run more conversions than the budget allows. The setting hot-applies — change it in the plugin config and Signal K will restart the plugin automatically; no server restart needed. In-flight conversions keep their already-spawned threads; the next conversion picks up the new budget.
 
 ## Usage
 

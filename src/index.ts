@@ -17,6 +17,10 @@ import {
   getCatalogsWithInstalledCharts,
   getConvertingCharts,
   getConvertingCount,
+  getConversionSlotsInUse,
+  isConversionNameInUse,
+  releasePendingConversion,
+  reservePendingConversion,
   getInstalledCatalogCharts,
   getOnlineCatalogChart,
   getOnlineCatalogCharts,
@@ -238,6 +242,15 @@ const DEFAULT_MASKED_CACHE_LIMIT_MB = 1024;
 // rendering for non-admin sessions (issue #99). The v1 api namespace is
 // only http_authorize-gated, so any authenticated user can read tiles.
 const chartTilesPath = `/signalk/v1/api/resources/charts`;
+
+// A download's conversion slot is released when the download ends. One that
+// completed has started converting by then: its listener marks the chart
+// converting before its first await, within this same event.
+for (const event of ['job-completed', 'job-failed', 'job-cancelled'] as const) {
+  downloadManager.on(event, (job: DownloadJob) => {
+    releasePendingConversion(job.id);
+  });
+}
 
 const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
   let chartProviders: Record<string, ChartProvider> = {};
@@ -3910,8 +3923,21 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
             return;
           }
 
+          const chartNumber = path
+            .basename(uploadedFileName, '.zip')
+            .replace(/[^a-zA-Z0-9_-]/g, '_');
+          // The converting state is keyed by chart number: a second conversion
+          // of one would share the first's slot.
+          if (isConversionNameInUse(chartNumber)) {
+            cleanupDir(tmpDir);
+            res.status(409).json({
+              success: false,
+              error: `${uploadedFileName} is already being converted. Please wait for it to finish.`
+            });
+            return;
+          }
           const budgetMax = getCpuBudget().maxConcurrentConversions;
-          if (getConvertingCount() >= budgetMax) {
+          if (getConversionSlotsInUse() >= budgetMax) {
             cleanupDir(tmpDir);
             res.status(429).json({
               success: false,
@@ -3919,10 +3945,6 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
             });
             return;
           }
-
-          const chartNumber = path
-            .basename(uploadedFileName, '.zip')
-            .replace(/[^a-zA-Z0-9_-]/g, '_');
 
           // Order matters: defer the success response until
           // makeQuarantineDir has actually returned. A permission /
@@ -4088,8 +4110,17 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
           }
         }
 
+        // The converting state is keyed by chart number: a second conversion
+        // of one would share the first's slot.
+        if (needsRuntime && isConversionNameInUse(chartNumber)) {
+          res.status(409).json({
+            success: false,
+            error: `${chartNumber} is already being converted. Please wait for it to finish.`
+          });
+          return;
+        }
         const budgetMax = getCpuBudget().maxConcurrentConversions;
-        if (needsRuntime && getConvertingCount() >= budgetMax) {
+        if (needsRuntime && getConversionSlotsInUse() >= budgetMax) {
           res.status(429).json({
             success: false,
             error: `Too many conversions running (max ${budgetMax}). Please wait for a conversion to finish.`
@@ -4426,7 +4457,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         return;
       }
       const budgetMax = getCpuBudget().maxConcurrentConversions;
-      if (getConvertingCount() >= budgetMax) {
+      if (getConversionSlotsInUse() >= budgetMax) {
         res.status(429).json({
           success: false,
           error: `Too many conversions running (max ${budgetMax}). Please wait for one to finish.`
@@ -4523,6 +4554,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     fs.mkdirSync(tmpDownloadDir, { recursive: true });
 
     const jobId = downloadManager.createJob(url, tmpDownloadDir, chartNumber, { saveRaw: true });
+    reservePendingConversion(jobId, chartNumber);
 
     trackInstall(chartNumber, catalogFile, zipfileDatetime ?? '', url);
     // Don't flag converting yet — the download still has to finish.
@@ -4645,6 +4677,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     fs.mkdirSync(tmpDownloadDir, { recursive: true });
 
     const jobId = downloadManager.createJob(url, tmpDownloadDir, chartNumber, { saveRaw: true });
+    reservePendingConversion(jobId, chartNumber);
 
     trackInstall(chartNumber, catalogFile, zipfileDatetime ?? '', url);
     // Set converting state inside the listener once the download has
@@ -4759,6 +4792,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     fs.mkdirSync(tmpDownloadDir, { recursive: true });
 
     const jobId = downloadManager.createJob(url, tmpDownloadDir, chartNumber, { saveRaw: true });
+    reservePendingConversion(jobId, chartNumber);
 
     trackInstall(chartNumber, catalogFile, zipfileDatetime ?? '', url);
     // Set converting state inside the listener once the download has
@@ -4869,6 +4903,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     fs.mkdirSync(tmpDownloadDir, { recursive: true });
 
     const jobId = downloadManager.createJob(url, tmpDownloadDir, chartNumber, { saveRaw: true });
+    reservePendingConversion(jobId, chartNumber);
 
     trackInstall(chartNumber, catalogFile, zipfileDatetime ?? '', url);
     // Set converting state inside the listener once the download has
@@ -5148,8 +5183,11 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         if (convertingFlagged) {
           return;
         }
+        if (isConversionNameInUse(id)) {
+          throw new Error(`${id} is already being converted. Please retry when it finishes.`);
+        }
         const convertBudgetMax = getCpuBudget().maxConcurrentConversions;
-        if (getConvertingCount() >= convertBudgetMax) {
+        if (getConversionSlotsInUse() >= convertBudgetMax) {
           throw new Error(
             `Too many conversions running (max ${convertBudgetMax}). Please retry when one finishes.`
           );
