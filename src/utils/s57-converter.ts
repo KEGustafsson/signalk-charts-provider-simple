@@ -856,7 +856,9 @@ export const _testInternals = {
   TIPPECANOE_LAYER_MANIFEST,
   surfaceExportErrorsIfEmpty,
   wantedMbtilesName,
-  stampMbtilesName
+  stampMbtilesName,
+  cellFiles,
+  linkBucketCells
 };
 
 async function runTippecanoe(
@@ -1200,17 +1202,77 @@ async function runTileJoin(
   onPercent?.(100);
 }
 
+// An S-57 update file: the cell's name with a three-digit extension past 000.
+const UPDATE_EXTENSION = /^\.\d{3}$/;
+
 /**
- * Fill one bucket's GeoJSON dir: from the caller's `geojsonFor` when it has
- * the output already, otherwise by running GDAL on the bucket's cells.
- *
- * GDAL gets hardlinks of the cells in a bucket-scoped dir, so the export
- * script (which walks `find <inDir> -name '*.000'`) only sees this bucket.
+ * The files GDAL reads for a cell: its `.000` and the update files beside it
+ * (`.001`, `.002`, …), which the S-57 driver applies when it opens the cell.
+ * An update's name is matched without regard to case, as producers differ;
+ * whoever places these for GDAL names each after the cell. When two files
+ * hold the same update in different case, the one named exactly like the
+ * cell is kept, else the first in sorted order.
+ */
+function cellFiles(cell: string): string[] {
+  const dir = path.dirname(cell);
+  const stem = path.basename(cell, path.extname(cell));
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [cell];
+  }
+  const exactFirst = (name: string): number =>
+    path.basename(name, path.extname(name)) === stem ? 0 : 1;
+  names.sort((a, b) => exactFirst(a) - exactFirst(b) || (a < b ? -1 : a > b ? 1 : 0));
+  const updates = new Map<string, string>();
+  for (const name of names) {
+    const ext = path.extname(name);
+    if (
+      !updates.has(ext) &&
+      path.basename(name, ext).toUpperCase() === stem.toUpperCase() &&
+      UPDATE_EXTENSION.test(ext) &&
+      ext !== '.000' &&
+      fs.statSync(path.join(dir, name)).isFile()
+    ) {
+      updates.set(ext, path.join(dir, name));
+    }
+  }
+  return [cell, ...updates.values()];
+}
+
+/**
+ * Hardlink a bucket's cells, each with its update files, into a
+ * bucket-scoped dir, so the export script (which walks
+ * `find <inDir> -name '*.000'`) only sees this bucket. Each file is named
+ * after its cell: GDAL looks for a cell's updates by the cell's own name.
  * Hardlinks keep IO cheap (no data copy) and — unlike symlinks — survive
  * being bind-mounted into a container: a symlink target pointing at an
  * absolute host path doesn't exist inside the container's filesystem
  * namespace, so `find` would silently miss every cell. Copy is the
  * fallback for the rare case where the scratch dir spans filesystems.
+ */
+function linkBucketCells(encDir: string, cells: readonly string[], bucketEncDir: string): void {
+  fs.mkdirSync(bucketEncDir, { recursive: true });
+  for (const cellPath of cells) {
+    const linkDir = path.join(bucketEncDir, path.dirname(path.relative(encDir, cellPath)));
+    fs.mkdirSync(linkDir, { recursive: true });
+    const stem = path.basename(cellPath, path.extname(cellPath));
+    for (const file of cellFiles(cellPath)) {
+      const linkPath = path.join(linkDir, `${stem}${path.extname(file)}`);
+      try {
+        fs.linkSync(file, linkPath);
+      } catch {
+        fs.copyFileSync(file, linkPath);
+      }
+    }
+  }
+}
+
+/**
+ * Fill one bucket's GeoJSON dir: from the caller's `geojsonFor` when it has
+ * the output already, otherwise by running GDAL on the bucket's cells,
+ * linked into `bucketEncDir` with their update files (linkBucketCells).
  */
 async function geojsonForBucket(
   encDir: string,
@@ -1224,17 +1286,7 @@ async function geojsonForBucket(
     await options.geojsonFor(cells, bucketGeojsonDir);
     return;
   }
-  fs.mkdirSync(bucketEncDir, { recursive: true });
-  for (const cellPath of cells) {
-    const cellRel = path.relative(encDir, cellPath);
-    const linkPath = path.join(bucketEncDir, cellRel);
-    fs.mkdirSync(path.dirname(linkPath), { recursive: true });
-    try {
-      fs.linkSync(cellPath, linkPath);
-    } catch {
-      fs.copyFileSync(cellPath, linkPath);
-    }
-  }
+  linkBucketCells(encDir, cells, bucketEncDir);
   await exportAllLayersToGeoJSON(
     bucketEncDir,
     cells,
