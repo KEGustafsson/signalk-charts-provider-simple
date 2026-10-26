@@ -47,6 +47,7 @@
     "@mapbox/vector-tile": "^3.0.0",
     "@signalk/server-api": "^2.0.0",
     "busboy": "^1.6.0",
+    "gdal3.js": "2.8.1",
     "geojson-vt": "^5.0.2",
     "jpeg-js": "^0.4.4",
     "pbf": "^5.1.0",
