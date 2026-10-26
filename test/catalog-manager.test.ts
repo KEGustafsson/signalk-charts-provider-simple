@@ -15,6 +15,8 @@ import {
   trackInstall,
   setInstallFilename,
   removeInstall,
+  removeInstallsUnderFolder,
+  removeUntrackedInstall,
   rollbackInstall,
   getInstalledCatalogCharts,
   checkForUpdates,
@@ -25,7 +27,12 @@ import {
   pruneStaleInstalls,
   refreshCatalog,
   refreshCatalogIfStale,
-  setCatalogChangedListener
+  setCatalogChangedListener,
+  setConvertingState,
+  getConversionSlotsInUse,
+  reservePendingConversion,
+  releasePendingConversion,
+  isConversionNameInUse
 } from '../dist/utils/catalog-manager.js';
 import type { CatalogInstall } from '../dist/types.js';
 
@@ -294,6 +301,111 @@ describe('CatalogManager', () => {
     // Clean up installs for subsequent tests
     after(() => {
       removeInstall('ncds_01a');
+    });
+  });
+
+  describe('removeInstallsUnderFolder()', () => {
+    afterEach(() => {
+      for (const key of Object.keys(getInstalledCatalogCharts())) {
+        removeInstall(key);
+      }
+    });
+
+    function install(chartNumber: string, filename: string): void {
+      trackInstall(chartNumber, 'NL_IENC.xml', '2026-01-01T00:00:00Z', 'https://example.com/x.zip');
+      setInstallFilename(chartNumber, filename);
+    }
+
+    it('removes the installs of charts anywhere inside the folder', () => {
+      install('a', 'Europe/NL/Waddenzee.mbtiles');
+      install('b', 'Europe/NL/Rivers/Maas.mbtiles');
+      install('c', 'Europe/DE/Elbe.mbtiles');
+      install('d', 'Waddenzee.mbtiles');
+
+      assert.strictEqual(removeInstallsUnderFolder('Europe/NL'), 2);
+      assert.deepStrictEqual(Object.keys(getInstalledCatalogCharts()).sort(), ['c', 'd']);
+    });
+
+    it('does not take a sibling folder that shares the name as a prefix', () => {
+      install('a', 'Europe/NL2/Waddenzee.mbtiles');
+
+      assert.strictEqual(removeInstallsUnderFolder('Europe/NL'), 0);
+      assert.ok(getInstalledCatalogCharts()['a']);
+    });
+
+    it('matches across path separators and a trailing slash', () => {
+      install('a', 'Europe\\NL\\Waddenzee.mbtiles');
+      install('b', 'Europe/NL/Maas.mbtiles');
+
+      assert.strictEqual(removeInstallsUnderFolder('Europe\\NL/'), 2);
+      assert.deepStrictEqual(getInstalledCatalogCharts(), {});
+    });
+  });
+
+  describe('removeUntrackedInstall()', () => {
+    afterEach(() => {
+      for (const key of Object.keys(getInstalledCatalogCharts())) {
+        removeInstall(key);
+      }
+    });
+
+    function settle(...chartNumbers: string[]): void {
+      for (const chartNumber of chartNumbers) {
+        trackInstall(chartNumber, 'Pilot.xml', '2026-01-01T00:00:00Z', 'https://example.com/x.tar');
+        setInstallFilename(chartNumber, 'tmp.mbtiles');
+      }
+      // Records from before filenames were tracked: committed, no filename.
+      const installsPath = path.join(TEST_DATA_DIR, 'catalog-installs.json');
+      const data = JSON.parse(fs.readFileSync(installsPath, 'utf-8')) as Record<
+        string,
+        CatalogInstall
+      >;
+      for (const chartNumber of chartNumbers) {
+        delete data[chartNumber].installedFilename;
+      }
+      fs.writeFileSync(installsPath, JSON.stringify(data));
+    }
+
+    it('removes a settled record without a filename by the legacy id match', async () => {
+      settle('poly-f');
+      await initCatalogManagerOffline();
+
+      assert.strictEqual(removeUntrackedInstall('gshhg-basemap-f'), true);
+      assert.deepStrictEqual(getInstalledCatalogCharts(), {});
+    });
+
+    it('matches a chart id to its own record, not to a shorter key it starts with', async () => {
+      settle('2', '20');
+      await initCatalogManagerOffline();
+
+      assert.strictEqual(removeUntrackedInstall('20'), true);
+      assert.deepStrictEqual(Object.keys(getInstalledCatalogCharts()), ['2']);
+    });
+
+    it('does not take a shorter key for a chart id without a separator', async () => {
+      settle('2');
+      await initCatalogManagerOffline();
+
+      assert.strictEqual(removeUntrackedInstall('20'), false);
+      assert.deepStrictEqual(Object.keys(getInstalledCatalogCharts()), ['2']);
+    });
+
+    it('removes the record of a chart whose id is the key and a suffix', async () => {
+      settle('12345');
+      await initCatalogManagerOffline();
+
+      assert.strictEqual(removeUntrackedInstall('12345_1'), true);
+      assert.deepStrictEqual(getInstalledCatalogCharts(), {});
+    });
+
+    it('leaves records with a tracked filename and records in flight alone', () => {
+      trackInstall('2', 'NL.xml', '2026-01-01T00:00:00Z', 'https://example.com/2.zip');
+      setInstallFilename('2', 'Port_of_Rotterdam_2.mbtiles');
+      trackInstall('3', 'NL.xml', '2026-01-01T00:00:00Z', 'https://example.com/3.zip');
+
+      assert.strictEqual(removeUntrackedInstall('Port_of_Rotterdam_2'), false);
+      assert.strictEqual(removeUntrackedInstall('3'), false);
+      assert.deepStrictEqual(Object.keys(getInstalledCatalogCharts()).sort(), ['2', '3']);
     });
   });
 
@@ -1101,6 +1213,42 @@ describe('CatalogManager', () => {
       await initCatalogManagerOffline();
       assert.ok(!fs.existsSync(path.join(cacheDir, '_registry.json')));
       assert.ok(!fs.existsSync(path.join(cacheDir, 'NOAA_MBTiles_Catalog.json')));
+    });
+  });
+
+  describe('conversion slots', () => {
+    it('counts downloads that will convert alongside running conversions', () => {
+      const before = getConversionSlotsInUse();
+      reservePendingConversion('dl_a', 'chart-a');
+      reservePendingConversion('dl_b', 'chart-b');
+      setConvertingState('slot-chart', true);
+      assert.strictEqual(getConversionSlotsInUse(), before + 3);
+
+      // A finished download releases its slot as its conversion takes one.
+      releasePendingConversion('dl_a');
+      assert.strictEqual(getConversionSlotsInUse(), before + 2);
+
+      // Releasing twice, or a job that never reserved, changes nothing.
+      releasePendingConversion('dl_a');
+      releasePendingConversion('dl_unknown');
+      assert.strictEqual(getConversionSlotsInUse(), before + 2);
+
+      releasePendingConversion('dl_b');
+      setConvertingState('slot-chart', false);
+      assert.strictEqual(getConversionSlotsInUse(), before);
+    });
+
+    it('knows a chart number taken by a running conversion or a download', () => {
+      assert.strictEqual(isConversionNameInUse('name-chart'), false);
+      reservePendingConversion('dl_name', 'name-chart');
+      assert.strictEqual(isConversionNameInUse('name-chart'), true);
+      releasePendingConversion('dl_name');
+      assert.strictEqual(isConversionNameInUse('name-chart'), false);
+      setConvertingState('name-chart', true);
+      assert.strictEqual(isConversionNameInUse('name-chart'), true);
+      setConvertingState('name-chart', false);
+      // Only the chart's own entry counts, not an inherited member.
+      assert.strictEqual(isConversionNameInUse('constructor'), false);
     });
   });
 });
