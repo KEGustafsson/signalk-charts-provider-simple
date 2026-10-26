@@ -156,6 +156,7 @@ import {
   refreshEncIndexIfStale
 } from './utils/enc-index-manager.js';
 import { resolveChartSet } from './utils/enc-chart-set.js';
+import { sweepLeftoverTempDirs } from './utils/temp-dirs.js';
 import {
   cachedGeojsonFor,
   cellsDir,
@@ -826,16 +827,9 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     };
     initLandIndex(dataDir, landIndexOptions);
 
-    const tempDirPattern =
-      /^(s57-download-|rnc-download-|pilot-download-|shp-download-|gshhg-|convert-upload-|custom-catalog-)\d+$/;
     try {
-      const dataDirEntries = fs.readdirSync(dataDir, { withFileTypes: true });
-      for (const entry of dataDirEntries) {
-        if (entry.isDirectory() && tempDirPattern.test(entry.name)) {
-          const fullPath = path.join(dataDir, entry.name);
-          console.log(`[charts-provider] Removing leftover temp directory: ${entry.name}`);
-          cleanupDir(fullPath);
-        }
+      for (const name of sweepLeftoverTempDirs(dataDir)) {
+        console.log(`[charts-provider] Removed leftover temp directory: ${name}`);
       }
     } catch (e) {
       app.debug(
