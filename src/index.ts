@@ -69,7 +69,7 @@ import {
   removeFolderState
 } from './utils/folder-state.js';
 import { getCpuBudget, setCpuBudget } from './utils/concurrency.js';
-import { PLUGIN_OWNER_ID } from './utils/container-jobs.js';
+import { PLUGIN_OWNER_ID, hasStartedJobs, holdJobsDuring } from './utils/container-jobs.js';
 import { getContainerManager, waitForContainerManager } from './utils/container-manager.js';
 import { MAX_CONVERSION_LOG_LINES, resolveLogTail } from './utils/conversion-log.js';
 import { downloadManager } from './utils/download-manager.js';
@@ -236,6 +236,9 @@ const DEFAULT_MASKED_CACHE_LIMIT_MB = 1024;
 // rendering for non-admin sessions (issue #99). The v1 api namespace is
 // only http_authorize-gated, so any authenticated user can read tiles.
 const chartTilesPath = `/signalk/v1/api/resources/charts`;
+
+// Orphaned helper containers are reaped once per process (see doStartup).
+let orphanReapDone = false;
 
 const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
   let chartProviders: Record<string, ChartProvider> = {};
@@ -947,19 +950,32 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
       // UI doesn't show "Installed" or "Converting…" for a job
       // that no longer exists. Requires signalk-container >= 1.3.0;
       // older versions don't have the API and we just skip.
-      if (typeof containerManager.cleanupOrphanedJobs === 'function') {
+      // signalk-container removes every job of our owner id, running or
+      // not, so this happens once per process, and only before the process
+      // started a job of its own: start() runs again on every config save
+      // while the previous start's conversions keep running, and their jobs
+      // are not orphans.
+      if (
+        typeof containerManager.cleanupOrphanedJobs === 'function' &&
+        !orphanReapDone &&
+        !hasStartedJobs()
+      ) {
+        orphanReapDone = true;
         try {
-          const cleanup = await containerManager.cleanupOrphanedJobs({
-            ownerPluginId: PLUGIN_OWNER_ID
-          });
-          // The next start reaps them again.
-          if (lifecycle !== started) {
-            return;
-          }
+          // Synchronously after the hasStartedJobs check, so no job of ours
+          // can start before the reap and be removed by it.
+          const cleanup = await holdJobsDuring(
+            containerManager.cleanupOrphanedJobs({
+              ownerPluginId: PLUGIN_OWNER_ID
+            })
+          );
+          // The rollback below clears process-wide conversion state, and
+          // reaping runs once per process, so it goes on even if a config
+          // save restarted the plugin meanwhile.
           // Labels we set on runJob calls have the form
           // `<stage>-<chartNumber>`, where <stage> is one of a fixed
-          // set of strings (gdal-export, tippecanoe, gdal-translate,
-          // gdaladdo, tar-extract, gdal-rasterize). The naïve
+          // set of strings (gdal-export, tippecanoe, tile-join,
+          // gdal-translate, gdaladdo, tar-extract, gdal-rasterize). The naïve
           // `replace(/^[a-z-]+-/, '')` was greedy — it would strip
           // every hyphenated prefix and corrupt chartNumbers that
           // themselves contain hyphens (e.g. `tippecanoe-abc-def`
@@ -970,6 +986,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
             'gdal-translate',
             'gdal-rasterize',
             'tar-extract',
+            'tile-join',
             'tippecanoe',
             'gdaladdo'
           ];

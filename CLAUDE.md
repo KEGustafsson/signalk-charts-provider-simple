@@ -62,6 +62,7 @@ From 2.0 onward, every container-runtime call (image pulls, helper-job execution
   - **signalk-container >= 1.6.0**: uses `manager.whenReady()` — a single await that resolves when runtime detection has settled. Faster than polling and avoids busy-checking `getRuntime()` every second.
   - **signalk-container < 1.6.0**: falls back to the original `while (!getRuntime()) await sleep` loop. The `whenReady?():` declaration is intentionally optional so older versions keep working.
   - Contract: `waitForContainerManager()` never rejects. `whenReady()` rejections are swallowed and treated as "detection didn't settle in time". The caller's job is to handle a `null` return by surfacing `setPluginError`, not to handle thrown errors.
+- Orphaned helper jobs are reaped once per process, and only before this process ran a job (`hasStartedJobs` in `utils/container-jobs.ts`), since signalk-container removes every job of our owner id, running or not: a config save restarts the plugin while its conversions keep running. `runJob` waits while a reap runs (`holdJobsDuring`).
 
 If `signalk-container` is missing, the plugin still loads and **serves charts** (display path needs no runtime); only the convert path is disabled, with `setPluginError` pointing the user at the App Store.
 

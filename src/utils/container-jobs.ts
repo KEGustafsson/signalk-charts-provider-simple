@@ -165,8 +165,35 @@ export const PLUGIN_OWNER_ID = 'signalk-charts-provider-simple';
  */
 const TOOLBOX_USER = { inImageUid: 1001, inImageGid: 1001 };
 
+// Whether this process has started a helper job: from then on, a job
+// labelled with our owner id may be one of ours, not an orphan.
+let startedJobs = false;
+// Settles once a running orphan reap is done; jobs start only after it, or
+// the reap could remove them, since they carry the same owner id.
+let jobsHeldUntil: Promise<unknown> = Promise.resolve();
+
+/** Whether this process has started a helper job (see orphan reaping in index.ts). */
+export function hasStartedJobs(): boolean {
+  return startedJobs;
+}
+
+/** Start no helper job until `reap` settles. */
+export function holdJobsDuring<T>(reap: Promise<T>): Promise<T> {
+  jobsHeldUntil = reap.catch(() => undefined);
+  return reap;
+}
+
 export async function runJob(opts: JobRunOptions): Promise<JobRunResult> {
   const manager = requireManager();
+  // A reap may begin while this one waits for the last; wait for it too.
+  for (;;) {
+    const held = jobsHeldUntil;
+    await held;
+    if (held === jobsHeldUntil) {
+      break;
+    }
+  }
+  startedJobs = true;
   const result = await manager.runJob({
     image: opts.image,
     command: opts.command,

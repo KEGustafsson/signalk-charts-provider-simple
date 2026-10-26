@@ -8,6 +8,7 @@ import {
   type ContainerManagerApi,
   type ContainerRuntimeInfo
 } from '../dist/utils/container-manager.js';
+import { hasStartedJobs, holdJobsDuring, runJob } from '../dist/utils/container-jobs.js';
 
 const GLOBAL_KEY = '__signalk_containerManager';
 
@@ -259,5 +260,35 @@ describe('waitForContainerManager', () => {
 
     assert.strictEqual(resolved, null);
     assert.strictEqual(getContainerManager(), null);
+  });
+});
+
+describe('runJob during an orphan reap', () => {
+  it('starts no helper job until the reap is done', async () => {
+    const started: string[] = [];
+    const manager = makeManager({ runtime: 'podman', version: '5.0.0' });
+    manager.runJob = (config) => {
+      started.push(config.label ?? '');
+      return Promise.resolve({ status: 'completed', exitCode: 0, log: [] });
+    };
+    globalThis[GLOBAL_KEY] = manager;
+    assert.strictEqual(await waitForContainerManager({ budgetMs: 1000 }), manager);
+
+    let finishReap: () => void = () => {};
+    const reap = holdJobsDuring(
+      new Promise<void>((resolve) => {
+        finishReap = resolve;
+      })
+    );
+    const job = runJob({ image: 'toolbox', command: ['true'], label: 'gdal-export-x' });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepStrictEqual(started, [], 'the job must wait for the reap');
+    assert.strictEqual(hasStartedJobs(), false);
+
+    finishReap();
+    await reap;
+    assert.strictEqual((await job).exitCode, 0);
+    assert.deepStrictEqual(started, ['gdal-export-x']);
+    assert.strictEqual(hasStartedJobs(), true);
   });
 });
