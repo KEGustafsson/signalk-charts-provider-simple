@@ -1225,6 +1225,19 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
       // folder after this listing is never a candidate, so the sweep cannot
       // delete a chart that a finishing upload or conversion just placed.
       const allFiles = await scanChartsRecursively(chartPath);
+      // Each chart file's identity as listed, to tell it apart from a file
+      // renamed over it later (a conversion promoting a chart of the same
+      // name). bigint: an inode can pass 2^53 (NTFS, ReFS).
+      const listed = new Map<string, fs.BigIntStats>();
+      for (const file of allFiles) {
+        if (file.name.endsWith('.mbtiles')) {
+          try {
+            listed.set(file.path, fs.statSync(file.path, { bigint: true }));
+          } catch {
+            // Gone already: nothing to remove.
+          }
+        }
+      }
       const charts = await findCharts(chartPath, resolveOnlineChart, getLandIndex() !== null);
       scanned = Object.values(charts);
       const validPaths = new Set(scanned.map((c) => c._filePath).filter(Boolean));
@@ -1247,16 +1260,23 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
       }
       for (const file of allFiles) {
         if (file.name.endsWith('.mbtiles') && !validPaths.has(file.path)) {
-          // A file changed since the listing was replaced after the charts
-          // were validated, by a conversion promoting a chart of the same
-          // name: it is not the file found invalid, so it is kept.
-          let current: fs.Stats;
+          // Only the file found invalid goes: one replaced since the listing
+          // (another device or inode) or rewritten in place (another size or
+          // time) came after the charts were validated, and is kept.
+          const before = listed.get(file.path);
+          let current: fs.BigIntStats;
           try {
-            current = fs.statSync(file.path);
+            current = fs.statSync(file.path, { bigint: true });
           } catch {
             continue;
           }
-          if (current.size !== file.size || current.mtimeMs !== file.dateModified) {
+          if (
+            !before ||
+            current.dev !== before.dev ||
+            current.ino !== before.ino ||
+            current.size !== before.size ||
+            current.mtimeNs !== before.mtimeNs
+          ) {
             continue;
           }
           console.log(`[charts-provider] Removing invalid .mbtiles file: ${file.name}`);
