@@ -741,6 +741,37 @@ export function getConvertingCount(): number {
   return Object.keys(converting).length;
 }
 
+// Catalog downloads that convert their chart once they finish: the chart
+// number of each, by download job id. Each holds a conversion slot from the
+// request on: the budget check runs when a download is requested, so without
+// the reservation several downloads requested together would each go on to
+// convert.
+const pendingConversions = new Map<string, string>();
+
+export function reservePendingConversion(jobId: string, chartNumber: string): void {
+  pendingConversions.set(jobId, chartNumber);
+}
+
+export function releasePendingConversion(jobId: string): void {
+  pendingConversions.delete(jobId);
+}
+
+/**
+ * Whether a conversion of `chartNumber` runs or a download will start one.
+ * The converting state is keyed by chart number, so a second conversion of
+ * the same number would share the first's slot.
+ */
+export function isConversionNameInUse(chartNumber: string): boolean {
+  return (
+    Object.hasOwn(converting, chartNumber) || [...pendingConversions.values()].includes(chartNumber)
+  );
+}
+
+/** What the CPU budget's conversion limit counts: running conversions and downloads that will convert. */
+export function getConversionSlotsInUse(): number {
+  return getConvertingCount() + pendingConversions.size;
+}
+
 export function checkForUpdates(): CatalogUpdate[] {
   const updates: CatalogUpdate[] = [];
 
