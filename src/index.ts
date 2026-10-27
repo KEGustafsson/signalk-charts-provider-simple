@@ -237,6 +237,8 @@ const PLUGIN_ID = PLUGIN_OWNER_ID;
 // Small enough for the SD card of a Raspberry Pi, large enough for a cruising area at harbour zoom.
 const DEFAULT_ONLINE_CACHE_LIMIT_MB = 2048;
 const DEFAULT_MASKED_CACHE_LIMIT_MB = 1024;
+// How long after the charts load the chart-directory sweep starts.
+const SWEEP_DELAY_MS = 30_000;
 // Tile URLs live under the Signal K v1 charts namespace so non-admin
 // users (readwrite/readonly) can fetch tiles. Routes under /plugins/* are
 // gated by adminAuthenticationMiddleware in the server, which blocks tile
@@ -334,6 +336,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
   // Off between stop() and the next start, so a late refresh (a finished
   // download, say) can't restart polling for a stopped plugin.
   let onlineTimeActive = false;
+  let sweepTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** A client read these charts: keep their timelines fresh while it does. */
   const touchOnlineTime = (providers: Iterable<ChartProvider>): void => {
@@ -526,6 +529,10 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     stop: () => {
       lifecycle++;
       stopped = true;
+      if (sweepTimer) {
+        clearTimeout(sweepTimer);
+        sweepTimer = null;
+      }
       setCatalogChangedListener(null);
       internet?.stop();
       internet = null;
@@ -1088,8 +1095,18 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     // never delay chart listing. It rescans the chart directory itself
     // rather than reusing the startup snapshot — charts may have been
     // uploaded/downloaded/converted during the container-manager wait, and
-    // a stale snapshot would delete them as "invalid".
-    void cleanupChartDirectory(chartPath);
+    // a stale snapshot would delete them as "invalid". It waits a while
+    // first: housekeeping is never urgent, and a lifecycle that ends sooner
+    // (Signal K restarts the plugin on each config save) then never opens the
+    // chart files a second time, which on Windows would keep them locked past
+    // stop().
+    if (started === lifecycle) {
+      sweepTimer = setTimeout(() => {
+        sweepTimer = null;
+        void cleanupChartDirectory(chartPath);
+      }, SWEEP_DELAY_MS);
+      sweepTimer.unref();
+    }
   };
 
   // A chart is served only when its own flag AND every ancestor folder's
@@ -1221,6 +1238,23 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     const started = lifecycle;
     let scanned: ChartProvider[] = [];
     try {
+      // Listed before the charts are validated: a chart promoted into the
+      // folder after this listing is never a candidate, so the sweep cannot
+      // delete a chart that a finishing upload or conversion just placed.
+      const allFiles = await scanChartsRecursively(chartPath);
+      // Each chart file's identity as listed, to tell it apart from a file
+      // renamed over it later (a conversion promoting a chart of the same
+      // name). bigint: an inode can pass 2^53 (NTFS, ReFS).
+      const listed = new Map<string, fs.BigIntStats>();
+      for (const file of allFiles) {
+        if (file.name.endsWith('.mbtiles')) {
+          try {
+            listed.set(file.path, fs.statSync(file.path, { bigint: true }));
+          } catch {
+            // Gone already: nothing to remove.
+          }
+        }
+      }
       const charts = await findCharts(chartPath, resolveOnlineChart, getLandIndex() !== null);
       scanned = Object.values(charts);
       const validPaths = new Set(scanned.map((c) => c._filePath).filter(Boolean));
@@ -1230,7 +1264,6 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
       if (lifecycle !== started) {
         return;
       }
-      const allFiles = await scanChartsRecursively(chartPath);
       // Repairable charts (valid tiles, missing metadata.bounds) are
       // deliberately excluded from findCharts(), so they'd otherwise be
       // unlinked here as "invalid" — destroying the very files the repair
@@ -1244,6 +1277,25 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
       }
       for (const file of allFiles) {
         if (file.name.endsWith('.mbtiles') && !validPaths.has(file.path)) {
+          // Only the file found invalid goes: one replaced since the listing
+          // (another device or inode) or rewritten in place (another size or
+          // time) came after the charts were validated, and is kept.
+          const before = listed.get(file.path);
+          let current: fs.BigIntStats;
+          try {
+            current = fs.statSync(file.path, { bigint: true });
+          } catch {
+            continue;
+          }
+          if (
+            !before ||
+            current.dev !== before.dev ||
+            current.ino !== before.ino ||
+            current.size !== before.size ||
+            current.mtimeNs !== before.mtimeNs
+          ) {
+            continue;
+          }
           console.log(`[charts-provider] Removing invalid .mbtiles file: ${file.name}`);
           try {
             fs.unlinkSync(file.path);
