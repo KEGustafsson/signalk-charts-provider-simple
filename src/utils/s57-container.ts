@@ -550,7 +550,25 @@ function stampMbtilesName(outputPath: string, name: string): void {
   }
 }
 
+// Preserve coastline detail end-to-end. Tippecanoe's defaults simplify lines
+// and polygons below the maxzoom and drop tiny polygons, which destroys the
+// coastline indentations that define marina basins, inland lagoons and
+// narrow harbour features. Nodes where lines or polygon rings meet stay where
+// they are, and with them tippecanoe keeps full coordinate precision instead
+// of scaling geometry down while reading it. A larger tile buffer (80,
+// default 5) keeps polygon edges that hug a tile boundary intact. Spell
+// options out in full:
+// tippecanoe's getopt_long takes any unique prefix of a long option, so a
+// misspelt one can silently select a different option.
+const TIPPECANOE_DETAIL_FLAGS = [
+  '--no-line-simplification',
+  '--no-simplification-of-shared-nodes',
+  '--no-tiny-polygon-reduction',
+  '--buffer=80'
+] as const;
+
 export const _testInternals = {
+  TIPPECANOE_DETAIL_FLAGS,
   consolidateGeoJSONByLayer,
   scaminMinzoom,
   buildExportScript,
@@ -657,14 +675,7 @@ async function runTippecanoe(
         '--no-tile-size-limit',
         '--no-feature-limit',
         '--detect-shared-borders',
-        // Preserve coastline detail end-to-end. Tippecanoe's defaults
-        // aggressively simplify and drop tiny polygons at high zooms, which
-        // destroys the coastline indentations that define marina basins,
-        // inland lagoons, and narrow harbour features. A larger tile buffer
-        // (80, default 5) keeps polygon edges that hug a tile boundary intact.
-        '--no-simplification',
-        '--no-tiny-polygon-reduction',
-        '--buffer=80',
+        ...TIPPECANOE_DETAIL_FLAGS,
         '--force'
       ],
       manifestContainerPath
