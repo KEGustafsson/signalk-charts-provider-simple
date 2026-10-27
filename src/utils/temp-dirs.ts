@@ -13,7 +13,7 @@ import fs from 'fs';
 import path from 'path';
 
 const TEMP_DIR_PATTERN =
-  /^(s57-download-|rnc-download-|pilot-download-|shp-download-|gshhg-|convert-upload-|custom-catalog-)\d+$/;
+  /^((s57-download-|rnc-download-|pilot-download-|shp-download-|gshhg-|convert-upload-|custom-catalog-)\d+|convert-local-\w+)$/;
 
 const sweptDataDirs = new Set<string>();
 

@@ -13,6 +13,11 @@ import { getContainerManager } from './container-manager.js';
 import { setConversionResult } from './conversion-progress.js';
 import { throwJobFailure } from './job-failure.js';
 import { setMbtilesType } from './mbtiles-metadata.js';
+import {
+  extractLocalChartSource,
+  isBsbChart,
+  type LocalChartSource
+} from './local-chart-source.js';
 import type {
   ConversionProgress,
   ConversionProgressMap,
@@ -202,6 +207,141 @@ async function addOverviews(mbtilesFile: string, chartNumber: string): Promise<v
   appendLog(chartNumber, `Overviews added for ${name}`);
 }
 
+/**
+ * Convert BSB/KAP charts under `inputRoot` to raster MBTiles in `chartsDir`,
+ * one per chart, at the chart's native zoom with overview zooms below it, in
+ * the helper container. A chart that fails is logged and skipped; throws when
+ * none converted. Returns the file names written.
+ */
+async function convertBsbCharts(
+  kapFiles: readonly string[],
+  inputRoot: string,
+  chartsDir: string,
+  chartNumber: string,
+  statusFn: StatusCallback
+): Promise<RncConversionResult> {
+  debug(`Found ${kapFiles.length} BSB chart file(s) to convert`);
+  appendLog(chartNumber, `Found ${kapFiles.length} BSB chart file(s)`);
+
+  statusFn('converting', `Converting ${kapFiles.length} BSB chart(s) to MBTiles...`);
+  if (chartNumber) {
+    conversionProgress[chartNumber].status = 'converting';
+  }
+
+  // Resolve the two host paths once for the whole loop — inputRoot and
+  // chartsDir don't change per-file.
+  const resolved = await resolveJobPaths({ '/input': inputRoot, '/output': chartsDir }, (cp, ap) =>
+    appendLog(
+      chartNumber,
+      `Cannot mount ${cp} ← ${ap}: path is not reachable from the SignalK container runtime.`
+    )
+  );
+  if (!resolved) {
+    throw new Error(
+      'BSB conversion paths are not reachable from the container runtime. ' +
+        'Move the chart directory under app.getDataDirPath() or extend the SignalK ' +
+        'container bind/volume to cover it.'
+    );
+  }
+  const inputPrefix = resolved['/input'].subPath
+    ? `/input/${resolved['/input'].subPath}`
+    : '/input';
+  const outputPrefix = resolved['/output'].subPath
+    ? `/output/${resolved['/output'].subPath}`
+    : '/output';
+
+  const mbtilesFiles: string[] = [];
+  let i = 0;
+  for (const kap of kapFiles) {
+    i += 1;
+    const relInput = path.relative(inputRoot, kap);
+    const baseName = path.basename(kap, path.extname(kap));
+    const outputName = `${baseName}.mbtiles`;
+    const containerInput = `${inputPrefix}/${relInput}`;
+    const containerOutput = `${outputPrefix}/${outputName}`;
+
+    const friendly = path.basename(kap);
+    appendLog(chartNumber, `PROGRESS: Converting ${friendly} (${i}/${kapFiles.length})`);
+    if (chartNumber && conversionProgress[chartNumber]) {
+      conversionProgress[chartNumber].message =
+        `Converting ${friendly} (${i}/${kapFiles.length})...`;
+    }
+
+    const translateResult = await runContainerJob({
+      image: CHARTS_TOOLBOX_IMAGE,
+      label: `gdal-translate-${baseName}`,
+      // chmod the output here, on the mandatory step that creates the file —
+      // not only on the optional gdaladdo overview step below. gdaladdo
+      // failure is tolerated (a warning, then we still patch metadata via
+      // setMbtilesType), and its withOutputChmod is skipped by `set -e` when
+      // the tool fails — which would leave the file 0o644 and the patch
+      // failing with "attempt to write a readonly database".
+      command: withOutputChmod(
+        [
+          'gdal_translate',
+          '-of',
+          'MBTiles',
+          '-co',
+          'TILE_FORMAT=PNG',
+          containerInput,
+          containerOutput
+        ],
+        containerOutput
+      ),
+      inputs: { '/input': resolved['/input'].source },
+      outputs: { '/output': resolved['/output'].source },
+      // Single-process GDAL stage; one core is enough.
+      resources: { cpus: 1 },
+      onStdoutLine: (line) => appendLog(chartNumber, line),
+      onStderrLine: (line) => appendLog(chartNumber, line)
+    });
+    if (translateResult.exitCode !== 0) {
+      appendLog(chartNumber, `ERROR: gdal_translate failed for ${friendly}`);
+      continue;
+    }
+
+    const overviewResult = await runContainerJob({
+      image: CHARTS_TOOLBOX_IMAGE,
+      label: `gdaladdo-${baseName}`,
+      command: withOutputChmod(
+        ['gdaladdo', '-r', 'average', containerOutput, '2', '4', '8', '16'],
+        containerOutput
+      ),
+      outputs: { '/output': resolved['/output'].source },
+      // Single-process; one core is enough.
+      resources: { cpus: 1 },
+      onStdoutLine: (line) => appendLog(chartNumber, line),
+      onStderrLine: (line) => appendLog(chartNumber, line)
+    });
+    if (overviewResult.exitCode !== 0) {
+      appendLog(chartNumber, `Warning: gdaladdo failed for ${friendly}`);
+    }
+
+    const tagResult = await setMbtilesType(path.join(chartsDir, outputName), 'tilelayer', {
+      onMessage: (msg) => appendLog(chartNumber, msg)
+    });
+    if (!tagResult.ok) {
+      appendLog(chartNumber, `Warning: failed to set tilelayer metadata for ${friendly}`);
+    }
+
+    if (fs.existsSync(path.join(chartsDir, outputName))) {
+      mbtilesFiles.push(outputName);
+    }
+  }
+
+  if (mbtilesFiles.length === 0) {
+    throw new Error('No charts converted');
+  }
+
+  const doneMsg = `Converted ${mbtilesFiles.length} chart(s) to MBTiles`;
+  statusFn('completed', doneMsg);
+
+  if (chartNumber) {
+    setConversionCompleted(chartNumber, doneMsg);
+  }
+  return { mbtilesFiles };
+}
+
 export async function processRncZip(
   zipPath: string,
   chartsDir: string,
@@ -266,127 +406,7 @@ export async function processRncZip(
       throw new Error('No .kap or .bsb files found in ZIP archive');
     }
 
-    debug(`Found ${kapFiles.length} BSB chart file(s) to convert`);
-    appendLog(chartNumber, `Found ${kapFiles.length} BSB chart file(s)`);
-
-    statusFn('converting', `Converting ${kapFiles.length} BSB chart(s) to MBTiles...`);
-    if (chartNumber) {
-      conversionProgress[chartNumber].status = 'converting';
-    }
-
-    // Resolve the two host paths once for the whole loop — tmpDir and
-    // chartsDir don't change per-file.
-    const resolved = await resolveJobPaths({ '/input': tmpDir, '/output': chartsDir }, (cp, ap) =>
-      appendLog(
-        chartNumber,
-        `Cannot mount ${cp} ← ${ap}: path is not reachable from the SignalK container runtime.`
-      )
-    );
-    if (!resolved) {
-      throw new Error(
-        'BSB conversion paths are not reachable from the container runtime. ' +
-          'Move the chart directory under app.getDataDirPath() or extend the SignalK ' +
-          'container bind/volume to cover it.'
-      );
-    }
-    const inputPrefix = resolved['/input'].subPath
-      ? `/input/${resolved['/input'].subPath}`
-      : '/input';
-    const outputPrefix = resolved['/output'].subPath
-      ? `/output/${resolved['/output'].subPath}`
-      : '/output';
-
-    const mbtilesFiles: string[] = [];
-    let i = 0;
-    for (const kap of kapFiles) {
-      i += 1;
-      const relInput = path.relative(tmpDir, kap);
-      const baseName = path.basename(kap, path.extname(kap));
-      const outputName = `${baseName}.mbtiles`;
-      const containerInput = `${inputPrefix}/${relInput}`;
-      const containerOutput = `${outputPrefix}/${outputName}`;
-
-      const friendly = path.basename(kap);
-      appendLog(chartNumber, `PROGRESS: Converting ${friendly} (${i}/${kapFiles.length})`);
-      if (chartNumber && conversionProgress[chartNumber]) {
-        conversionProgress[chartNumber].message =
-          `Converting ${friendly} (${i}/${kapFiles.length})...`;
-      }
-
-      const translateResult = await runContainerJob({
-        image: CHARTS_TOOLBOX_IMAGE,
-        label: `gdal-translate-${baseName}`,
-        // chmod the output here, on the mandatory step that creates the file —
-        // not only on the optional gdaladdo overview step below. gdaladdo
-        // failure is tolerated (a warning, then we still patch metadata via
-        // setMbtilesType), and its withOutputChmod is skipped by `set -e` when
-        // the tool fails — which would leave the file 0o644 and the patch
-        // failing with "attempt to write a readonly database".
-        command: withOutputChmod(
-          [
-            'gdal_translate',
-            '-of',
-            'MBTiles',
-            '-co',
-            'TILE_FORMAT=PNG',
-            containerInput,
-            containerOutput
-          ],
-          containerOutput
-        ),
-        inputs: { '/input': resolved['/input'].source },
-        outputs: { '/output': resolved['/output'].source },
-        // Single-process GDAL stage; one core is enough.
-        resources: { cpus: 1 },
-        onStdoutLine: (line) => appendLog(chartNumber, line),
-        onStderrLine: (line) => appendLog(chartNumber, line)
-      });
-      if (translateResult.exitCode !== 0) {
-        appendLog(chartNumber, `ERROR: gdal_translate failed for ${friendly}`);
-        continue;
-      }
-
-      const overviewResult = await runContainerJob({
-        image: CHARTS_TOOLBOX_IMAGE,
-        label: `gdaladdo-${baseName}`,
-        command: withOutputChmod(
-          ['gdaladdo', '-r', 'average', containerOutput, '2', '4', '8', '16'],
-          containerOutput
-        ),
-        outputs: { '/output': resolved['/output'].source },
-        // Single-process; one core is enough.
-        resources: { cpus: 1 },
-        onStdoutLine: (line) => appendLog(chartNumber, line),
-        onStderrLine: (line) => appendLog(chartNumber, line)
-      });
-      if (overviewResult.exitCode !== 0) {
-        appendLog(chartNumber, `Warning: gdaladdo failed for ${friendly}`);
-      }
-
-      const tagResult = await setMbtilesType(path.join(chartsDir, outputName), 'tilelayer', {
-        onMessage: (msg) => appendLog(chartNumber, msg)
-      });
-      if (!tagResult.ok) {
-        appendLog(chartNumber, `Warning: failed to set tilelayer metadata for ${friendly}`);
-      }
-
-      if (fs.existsSync(path.join(chartsDir, outputName))) {
-        mbtilesFiles.push(outputName);
-      }
-    }
-
-    if (mbtilesFiles.length === 0) {
-      throw new Error('No charts converted');
-    }
-
-    const doneMsg = `Converted ${mbtilesFiles.length} chart(s) to MBTiles`;
-    statusFn('completed', doneMsg);
-
-    if (chartNumber) {
-      setConversionCompleted(chartNumber, doneMsg);
-    }
-
-    return { mbtilesFiles };
+    return await convertBsbCharts(kapFiles, tmpDir, chartsDir, chartNumber, statusFn);
   } catch (err) {
     if (chartNumber) {
       setConversionFailed(
@@ -401,6 +421,85 @@ export async function processRncZip(
     } catch {
       debug(`Warning: failed to clean up temp dir ${tmpDir}`);
     }
+  }
+}
+
+/**
+ * Convert the BSB charts of a folder or ZIP on the server's disk (see
+ * local-chart-source.ts), one MBTiles each, into `chartsDir`. Its archives
+ * are extracted under `workDir`, which the caller removes; the source is
+ * only read.
+ */
+export async function processRncLocal(
+  source: LocalChartSource,
+  workDir: string,
+  chartsDir: string,
+  chartNumber: string,
+  onStatus: StatusCallback | null
+): Promise<RncConversionResult> {
+  const statusFn = onStatus ?? (() => {});
+  conversionProgress[chartNumber] = {
+    status: 'starting',
+    message: 'Starting RNC conversion...',
+    log: []
+  };
+  try {
+    statusFn('checking', 'Checking container runtime...');
+    if (!getContainerManager()) {
+      throw new Error(
+        'signalk-container plugin is required for chart conversion. ' +
+          'Install it from the App Store and restart Signal K.'
+      );
+    }
+    statusFn('pulling', 'Checking charts-toolbox image...');
+    conversionProgress[chartNumber].status = 'pulling';
+    conversionProgress[chartNumber].message = 'Checking charts-toolbox image...';
+    await ensureContainerImage(CHARTS_TOOLBOX_IMAGE, (msg) => debug(msg));
+
+    let kapFiles: string[];
+    try {
+      ({ files: kapFiles } = await extractLocalChartSource(
+        source,
+        isBsbChart,
+        workDir,
+        (zip, index, count) => {
+          const message = `Extracting ${path.basename(zip)} (${String(index)}/${String(count)})...`;
+          statusFn('extracting', message);
+          conversionProgress[chartNumber].status = 'extracting';
+          conversionProgress[chartNumber].message = message;
+        }
+      ));
+    } catch (err) {
+      throw new Error(
+        `Extracting the ZIP files failed: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err }
+      );
+    }
+    if (kapFiles.length === 0) {
+      throw new Error('No .kap or .bsb files found');
+    }
+
+    // Staged in the work folder, which the helper container can always
+    // mount; the chart folder may be one it cannot. One folder per chart, so
+    // charts of the same name in different folders do not collide.
+    const stagedRoot = path.join(workDir, 'bsb');
+    const staged = kapFiles.map((kap, index) => {
+      const dest = path.join(stagedRoot, String(index), path.basename(kap));
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      try {
+        fs.linkSync(kap, dest);
+      } catch {
+        fs.copyFileSync(kap, dest);
+      }
+      return dest;
+    });
+    return await convertBsbCharts(staged, stagedRoot, chartsDir, chartNumber, statusFn);
+  } catch (err) {
+    setConversionFailed(
+      chartNumber,
+      (err instanceof Error ? err.message : String(err)) || 'Conversion failed'
+    );
+    throw err;
   }
 }
 
