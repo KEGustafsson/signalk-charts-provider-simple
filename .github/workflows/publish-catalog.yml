@@ -79,7 +79,7 @@ jobs:
             $FORCE
 
       # Downloads only archives whose date changed since the published index,
-      # and runs GDAL in the charts-toolbox image (docs/enc-index.md).
+      # and reads them with the plugin's WebAssembly GDAL (docs/enc-index.md).
       - name: Build ENC index
         id: enc-index
         env:
