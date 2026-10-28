@@ -47,11 +47,11 @@ Chart conversion (S-57 ENC, BSB raster, basemaps) is the only CPU-heavy thing th
 
 | Setting | What happens during a conversion | When to pick it |
 |---|---|---|
-| `single-core` | One job at a time: one worker thread, or a helper container capped at one core with each `ogr2ogr` run sequentially | Multi-tenant Pi (Signal K + Grafana + Node-RED + …) where keeping the rest of the box responsive matters more than conversion speed |
-| `half` (default) | One job at a time on half the cores: that many worker threads, or tippecanoe threads and parallel `ogr2ogr` exports | Balanced — leaves half the box for everything else |
+| `single-core` | One job at a time: one worker process, or a helper container capped at one core with each `ogr2ogr` run sequentially | Multi-tenant Pi (Signal K + Grafana + Node-RED + …) where keeping the rest of the box responsive matters more than conversion speed |
+| `half` (default) | One job at a time on half the cores: that many worker processes, or tippecanoe threads and parallel `ogr2ogr` exports | Balanced — leaves half the box for everything else |
 | `all` | One full-throttle job using every core in every stage; another conversion is refused (HTTP 429) until it finishes | Dedicated chart-prep box, or when you just want a chart set to finish as fast as possible |
 
-Conversion runs in a helper container or in worker threads, never on Signal K's event loop. A catalog download that converts its chart holds its slot from the moment it is requested, so downloads started together cannot go on to run more conversions than the budget allows. The setting hot-applies — change it in the plugin config and Signal K will restart the plugin automatically; no server restart needed. In-flight conversions keep their containers and workers; the next conversion picks up the new budget.
+Conversion runs in a helper container or in worker processes, never on Signal K's event loop. A catalog download that converts its chart holds its slot from the moment it is requested, so downloads started together cannot go on to run more conversions than the budget allows. The setting hot-applies — change it in the plugin config and Signal K will restart the plugin automatically; no server restart needed. In-flight conversions keep their containers and workers; the next conversion picks up the new budget.
 
 ## Usage
 

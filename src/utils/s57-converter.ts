@@ -489,7 +489,7 @@ export async function exportS57CellsToGeoJSON(
  * built with each IHO band at its own zooms. The container toolchain runs
  * GDAL and tippecanoe in the charts-toolbox image (s57-container.ts); its
  * WebAssembly fallback runs GDAL and the vector tiler on the conversion's
- * worker threads (see planTileSources). `options.backend` pins the
+ * worker processes (see planTileSources). `options.backend` pins the
  * toolchain; otherwise conversion-backend.ts picks one.
  *
  * `encDir` is treated as read-only input. All conversion scratch is created
@@ -643,7 +643,7 @@ export async function processS57Directory(
 
 /**
  * Tile S-57 cells into `outputPath` with the WebAssembly toolchain: GDAL
- * exports each cell on the conversion's worker threads, then the vector
+ * exports each cell on the conversion's worker processes, then the vector
  * tiler builds every band in one pass.
  */
 async function tileS57WithWasm(
@@ -691,12 +691,10 @@ async function tileS57WithWasm(
   }
 
   const tilePool = getTilePoolSize();
-  if (tilePool.workers < workers || tilePool.heapMb !== undefined) {
+  if (tilePool.workers < workers || tilePool.reduced) {
     appendLog(
       chartNumber,
-      `Tiling with ${tilePool.workers} worker(s)` +
-        (tilePool.heapMb === undefined ? '' : `, ${tilePool.heapMb} MB heap each`) +
-        ', to fit the free memory'
+      `Tiling with ${tilePool.workers} worker(s), ${tilePool.heapMb} MB heap each, to fit the free memory`
     );
   }
   await withWorkerPool(tilePool, options.signal, async (pool) => {
@@ -716,9 +714,7 @@ async function tileS57WithWasm(
       pool,
       name: wantedMbtilesName(chartNumber, options.displayName),
       description: options.displayDescription,
-      ...(tilePool.heapMb === undefined
-        ? {}
-        : { shardBytesLimit: shardBytesForHeap(tilePool.heapMb) }),
+      shardBytesLimit: shardBytesForHeap(tilePool.heapMb),
       signal: options.signal,
       log: (msg) => {
         appendLog(chartNumber, msg);
