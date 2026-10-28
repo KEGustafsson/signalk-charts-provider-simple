@@ -691,12 +691,10 @@ async function tileS57WithWasm(
   }
 
   const tilePool = getTilePoolSize();
-  if (tilePool.workers < workers || tilePool.heapMb !== undefined) {
+  if (tilePool.workers < workers || tilePool.reduced) {
     appendLog(
       chartNumber,
-      `Tiling with ${tilePool.workers} worker(s)` +
-        (tilePool.heapMb === undefined ? '' : `, ${tilePool.heapMb} MB heap each`) +
-        ', to fit the free memory'
+      `Tiling with ${tilePool.workers} worker(s), ${tilePool.heapMb} MB heap each, to fit the free memory`
     );
   }
   await withWorkerPool(tilePool, options.signal, async (pool) => {
@@ -716,9 +714,7 @@ async function tileS57WithWasm(
       pool,
       name: wantedMbtilesName(chartNumber, options.displayName),
       description: options.displayDescription,
-      ...(tilePool.heapMb === undefined
-        ? {}
-        : { shardBytesLimit: shardBytesForHeap(tilePool.heapMb) }),
+      shardBytesLimit: shardBytesForHeap(tilePool.heapMb),
       signal: options.signal,
       log: (msg) => {
         appendLog(chartNumber, msg);

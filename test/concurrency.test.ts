@@ -134,21 +134,45 @@ describe('cpu budget presets', () => {
 
   describe('tilePoolSize', () => {
     it('keeps the CPU budget and the server heap limit when memory is plentiful', () => {
-      assert.deepStrictEqual(tilePoolSize(2, 20000, 4144), { workers: 2, heapMb: 4144 });
+      assert.deepStrictEqual(tilePoolSize(2, 20000, 4144), {
+        workers: 2,
+        heapMb: 4144,
+        reduced: false
+      });
     });
 
     it('runs fewer workers when the free memory holds fewer', () => {
-      assert.deepStrictEqual(tilePoolSize(4, 3500, 4144), { workers: 2, heapMb: 875 });
+      assert.deepStrictEqual(tilePoolSize(4, 3500, 4144), {
+        workers: 2,
+        heapMb: 875,
+        reduced: true
+      });
     });
 
     it('keeps one worker with a smaller heap when memory is short', () => {
-      assert.deepStrictEqual(tilePoolSize(2, 1200, 2096), { workers: 1, heapMb: 600 });
-      assert.deepStrictEqual(tilePoolSize(2, 300, 2096), { workers: 1, heapMb: 256 });
+      assert.deepStrictEqual(tilePoolSize(2, 1200, 2096), {
+        workers: 1,
+        heapMb: 600,
+        reduced: true
+      });
+      assert.deepStrictEqual(tilePoolSize(2, 300, 2096), {
+        workers: 1,
+        heapMb: 256,
+        reduced: true
+      });
     });
 
     it('never raises the heap above the server heap limit', () => {
-      assert.deepStrictEqual(tilePoolSize(1, 12000, 2096), { workers: 1, heapMb: 2096 });
-      assert.deepStrictEqual(tilePoolSize(4, 9000, 512), { workers: 4, heapMb: 512 });
+      assert.deepStrictEqual(tilePoolSize(1, 12000, 2096), {
+        workers: 1,
+        heapMb: 2096,
+        reduced: false
+      });
+      assert.deepStrictEqual(tilePoolSize(4, 9000, 512), {
+        workers: 4,
+        heapMb: 512,
+        reduced: false
+      });
     });
 
     it('reads this host within the live budget', () => {

@@ -8,9 +8,7 @@
  *
  * The process exits when its pool closes, which returns all of its memory
  * to the system. A worker thread's did not go back: gdal3.js's WebAssembly
- * memory and glibc's per-thread malloc arenas stayed with the server, and
- * four NOAA cells converted three times in a row left it holding 478 MB
- * where it had started at 64 MB; it now holds 155 MB (x86).
+ * memory and glibc's per-thread malloc arenas stayed with the server.
  *
  * argv[2] is the thread's old-generation limit in MB, or empty for V8's
  * default. A thread that fails (its heap limit reached, say) writes why to

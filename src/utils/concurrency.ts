@@ -89,6 +89,8 @@ export interface TilePoolSize {
   workers: number;
   /** Old-generation limit of each worker. */
   heapMb: number;
+  /** Whether the heap is below the server's own limit: memory is short. */
+  reduced: boolean;
 }
 
 /**
@@ -110,7 +112,7 @@ export function tilePoolSize(
     Math.min(workersPerJob, Math.floor(availableMb / TILE_WORKER_MEMORY_MB))
   );
   const heap = Math.max(MIN_TILE_HEAP_MB, Math.floor(availableMb / workers / 2));
-  return { workers, heapMb: Math.min(heap, defaultHeapMb) };
+  return { workers, heapMb: Math.min(heap, defaultHeapMb), reduced: heap < defaultHeapMb };
 }
 
 const MB = 1024 * 1024;

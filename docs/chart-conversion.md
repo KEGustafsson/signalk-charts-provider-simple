@@ -90,10 +90,8 @@ save while the previous start's conversions keep running.
   loads its own GDAL instance on first use. The pool closes when the
   conversion ends, and the processes exit, which returns all their memory to
   the system: the WebAssembly heaps, which never shrink, and glibc's malloc
-  arenas. Worker threads in the server kept both: four NOAA cells converted
-  three times left the server at 478 MB, now 155 MB, from 64 MB at start
-  (x86). Cancelling a conversion kills its workers, so a GDAL call or a
-  tiling shard stops at once.
+  arenas. Worker threads in the server kept both. Cancelling a conversion
+  kills its workers, so a GDAL call or a tiling shard stops at once.
 - **Vector tiler** (`src/utils/vector-tiler.ts`,
   `src/utils/vector-tile-shard.ts`), the replacement for tippecanoe and
   tile-join. See below.
