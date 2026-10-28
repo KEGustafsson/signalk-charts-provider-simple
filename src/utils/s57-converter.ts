@@ -852,7 +852,8 @@ export async function processS57Local(
         onStatus?.('extracting', message);
         setProgress(chartNumber, 'extracting', message);
       },
-      isS57Update
+      isS57Update,
+      options.signal
     );
     const gathered = gatherCellUpdates(found.files, found.companions, workDir);
     cells = gathered.cells;
@@ -863,6 +864,10 @@ export async function processS57Local(
       );
     }
   } catch (err) {
+    if (options.signal?.aborted) {
+      setConversionFailed(chartNumber, CONVERSION_ABORTED_MESSAGE);
+      throw new Error(CONVERSION_ABORTED_MESSAGE, { cause: err });
+    }
     setConversionFailed(
       chartNumber,
       `Extracting the ZIP files failed: ${err instanceof Error ? err.message : String(err)}`
