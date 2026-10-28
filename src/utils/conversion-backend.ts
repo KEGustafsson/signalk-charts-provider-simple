@@ -25,7 +25,7 @@ export type ConversionBackend = 'container' | 'wasm';
 
 // Message thrown when an in-progress conversion is cancelled: at a stage
 // boundary, or mid-stage when the abort signal kills the container job
-// (signalk-container >= 1.16.0) or terminates the worker threads. Callers
+// (signalk-container >= 1.16.0) or kills the worker processes. Callers
 // (the Custom Catalogs flow) detect cancellation via their own flag, so this
 // is just a recognizable stop signal.
 export const CONVERSION_ABORTED_MESSAGE = 'Conversion cancelled';

@@ -6,7 +6,12 @@ import path from 'node:path';
 
 import { chartOutputNames } from '../dist/utils/rnc-converter.js';
 import { forEachLine } from '../dist/utils/line-reader.js';
-import { TaskFailedError, withWorkerPool } from '../dist/utils/worker-pool.js';
+import {
+  PoolAbortedError,
+  TaskFailedError,
+  withWorkerPool,
+  workerExitMessage
+} from '../dist/utils/worker-pool.js';
 
 describe('forEachLine', () => {
   it('keeps multi-byte characters whole across read boundaries', () => {
@@ -115,6 +120,41 @@ describe('WorkerPool', () => {
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
+  });
+
+  it('kills a worker mid-task when the pool is aborted', async () => {
+    const controller = new AbortController();
+    await withWorkerPool(1, controller.signal, async (pool) => {
+      const running = pool.run({
+        op: 'gdal-translate',
+        source: { path: path.join(os.tmpdir(), 'no-such-chart.kap') },
+        dst: path.join(os.tmpdir(), 'no-such-chart.mbtiles'),
+        args: ['-of', 'MBTiles']
+      });
+      controller.abort();
+      await assert.rejects(running, (err: unknown) => err instanceof PoolAbortedError);
+    });
+  });
+
+  it('names the heap limit of a worker that reached it', () => {
+    // V8's native stack trace comes after the reason, so the reason is
+    // spotted as stderr arrives rather than read from its last line.
+    assert.strictEqual(
+      workerExitMessage(null, 'SIGTRAP', ' 7: 0xe8d35e _start [node]', 768, true),
+      'Conversion worker stopped at its 768 MB heap limit (exited with signal SIGTRAP)'
+    );
+    assert.strictEqual(
+      workerExitMessage(1, null, 'Worker terminated due to reaching memory limit', undefined, true),
+      'Conversion worker stopped at its heap limit (exited with code 1)'
+    );
+    assert.strictEqual(
+      workerExitMessage(1, null, 'first\nRangeError: bad tile\n', 768, false),
+      'Conversion worker exited with code 1: RangeError: bad tile'
+    );
+    assert.strictEqual(
+      workerExitMessage(null, 'SIGKILL', '', 768, false),
+      'Conversion worker exited with signal SIGKILL'
+    );
   });
 
   it('reports a failed task as a TaskFailedError', async () => {

@@ -6,7 +6,6 @@ import {
   setCpuBudget,
   getCpuBudget,
   getTilePoolSize,
-  setsHeapLimit,
   tilePoolSize
 } from '../dist/utils/concurrency.js';
 
@@ -134,8 +133,8 @@ describe('cpu budget presets', () => {
   });
 
   describe('tilePoolSize', () => {
-    it('keeps the CPU budget and V8 default heap when memory is plentiful', () => {
-      assert.deepStrictEqual(tilePoolSize(2, 20000, 4144), { workers: 2, heapMb: undefined });
+    it('keeps the CPU budget and the server heap limit when memory is plentiful', () => {
+      assert.deepStrictEqual(tilePoolSize(2, 20000, 4144), { workers: 2, heapMb: 4144 });
     });
 
     it('runs fewer workers when the free memory holds fewer', () => {
@@ -147,20 +146,9 @@ describe('cpu budget presets', () => {
       assert.deepStrictEqual(tilePoolSize(2, 300, 2096), { workers: 1, heapMb: 256 });
     });
 
-    it('never raises the heap above V8 default', () => {
-      assert.deepStrictEqual(tilePoolSize(1, 12000, 2096), { workers: 1, heapMb: undefined });
-    });
-
-    it('counts a worker as twice a heap set with --max-old-space-size', () => {
-      assert.deepStrictEqual(tilePoolSize(4, 9000, 2096, true), { workers: 2, heapMb: undefined });
-      assert.deepStrictEqual(tilePoolSize(4, 9000, 512, true), { workers: 4, heapMb: undefined });
-      assert.deepStrictEqual(tilePoolSize(4, 1000, 4144, true), { workers: 1, heapMb: undefined });
-    });
-
-    it('spots the heap flag in either spelling', () => {
-      assert.ok(setsHeapLimit(['--max-old-space-size=4096']));
-      assert.ok(setsHeapLimit(['--trace-warnings', '--max_old_space_size=4096']));
-      assert.ok(!setsHeapLimit(['--max-semi-space-size=64', '']));
+    it('never raises the heap above the server heap limit', () => {
+      assert.deepStrictEqual(tilePoolSize(1, 12000, 2096), { workers: 1, heapMb: 2096 });
+      assert.deepStrictEqual(tilePoolSize(4, 9000, 512), { workers: 4, heapMb: 512 });
     });
 
     it('reads this host within the live budget', () => {

@@ -14,7 +14,7 @@
  * heap still converts.
  *
  * One instance is single-threaded and owns its heap. The converters run one
- * per worker thread (see conversion-worker.ts), never on the server's event
+ * per conversion worker (see conversion-worker.ts), never on the server's event
  * loop.
  */
 

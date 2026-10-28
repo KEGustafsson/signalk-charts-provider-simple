@@ -46,8 +46,8 @@ What differs between the two:
 |---|---|---|
 | S-57 tiling | One tippecanoe per IHO band, then tile-join (`join` progress stage, `joining` chart-set phase); a single-band bundle runs one tippecanoe with its maxzoom clamped to the band's | Every band in one pass of the built-in tiler |
 | Raster overviews | `gdaladdo -r average` | Averaged from the tiles below (`raster-pyramid.ts`) |
-| CPU budget | Tippecanoe threads and parallel exports, also enforced as the job's CPU cap | Worker threads (both from `concurrency.ts`) |
-| Cancel | Kills the job where signalk-container supports it, else stops at the next band | Terminates the worker threads |
+| CPU budget | Tippecanoe threads and parallel exports, also enforced as the job's CPU cap | Worker processes (both from `concurrency.ts`) |
+| Cancel | Kills the job where signalk-container supports it, else stops at the next band | Kills the worker processes |
 
 Both share the rest: archive extraction in JavaScript (ZIP, `.tar`,
 `.tar.gz`, `.tar.xz`), one cell of each name (`uniqueCells`), output naming,
@@ -65,7 +65,7 @@ save while the previous start's conversions keep running.
 ## The WebAssembly toolchain
 
 ```
-              ┌─────────── conversion worker threads (worker-pool.ts) ───────────┐
+              ┌────────── conversion worker processes (worker-pool.ts) ──────────┐
  .000 / .kap  │  GDAL (gdal3.js,       GeoJSON    vector tiler                    │
  .shp ──────► │  WebAssembly)  ──────────────────► bucket → tile shards → merge   │──► .mbtiles
  .tar.xz      │  one instance per worker           (geojson-vt + vt-pbf)          │
@@ -83,12 +83,17 @@ save while the previous start's conversions keep running.
   mounted into the Emscripten file system with NODEFS, so GDAL reads and
   writes the real files in place: a chart larger than the WebAssembly heap
   still converts.
-- **Worker threads** (`src/utils/worker-pool.ts`,
-  `src/utils/conversion-worker.ts`). Each conversion opens a pool sized by the
-  CPU budget (`concurrency.ts`), and each worker loads its own GDAL instance on
-  first use. The pool closes when the conversion ends, which frees the
-  WebAssembly heaps (they never shrink). Cancelling a conversion terminates its
-  workers, so a GDAL call or a tiling shard stops at once.
+- **Worker processes** (`src/utils/worker-pool.ts`,
+  `src/utils/conversion-process.ts`, `src/utils/conversion-worker.ts`). Each
+  conversion opens a pool sized by the CPU budget (`concurrency.ts`). Each
+  worker is a child process that runs the tasks on a thread of its own and
+  loads its own GDAL instance on first use. The pool closes when the
+  conversion ends, and the processes exit, which returns all their memory to
+  the system: the WebAssembly heaps, which never shrink, and glibc's malloc
+  arenas. Worker threads in the server kept both: four NOAA cells converted
+  three times left the server at 478 MB, now 155 MB, from 64 MB at start
+  (x86). Cancelling a conversion kills its workers, so a GDAL call or a
+  tiling shard stops at once.
 - **Vector tiler** (`src/utils/vector-tiler.ts`,
   `src/utils/vector-tile-shard.ts`), the replacement for tippecanoe and
   tile-join. See below.

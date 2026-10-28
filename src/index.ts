@@ -3937,8 +3937,8 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     const conversionAborts = new Map<string, AbortController>();
 
     // Cancel a running upload or local-folder conversion: its container job
-    // is killed (signalk-container >= 1.16.0) or its worker threads are
-    // terminated, and nothing is installed.
+    // is killed (signalk-container >= 1.16.0) or its worker processes are
+    // killed, and nothing is installed.
     // A cancellation can land after the converter reported success, so it
     // replaces whatever result the converter left.
     const markCancelled = (chartNumber: string, isS57: boolean): void => {
@@ -4689,7 +4689,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         sectionPercent: -1
       });
       // Aborts the in-flight conversion (its container job is killed on
-      // signalk-container >= 1.16.0, its worker threads are terminated);
+      // signalk-container >= 1.16.0, its worker processes are killed);
       // downloads stop between charts; older containers stop at a band
       // boundary.
       res.json({ success: true, message: 'Cancellation requested' });
@@ -5289,7 +5289,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
 
     // Abort controller for mid-job cancel: requestCatalogCancel(id) aborts it,
     // which kills the in-flight container job (signalk-container >= 1.16.0)
-    // or terminates the conversion's worker threads.
+    // or kills the conversion's worker processes.
     const abortController = new AbortController();
     registerCatalogAbort(id, abortController);
 
