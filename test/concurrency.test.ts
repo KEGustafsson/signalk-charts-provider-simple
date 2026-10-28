@@ -144,7 +144,7 @@ describe('cpu budget presets', () => {
     it('runs fewer workers when the free memory holds fewer', () => {
       assert.deepStrictEqual(tilePoolSize(4, 3500, 4144), {
         workers: 2,
-        heapMb: 875,
+        heapMb: 825,
         reduced: true
       });
     });
@@ -152,7 +152,7 @@ describe('cpu budget presets', () => {
     it('keeps one worker with a smaller heap when memory is short', () => {
       assert.deepStrictEqual(tilePoolSize(2, 1200, 2096), {
         workers: 1,
-        heapMb: 600,
+        heapMb: 550,
         reduced: true
       });
       assert.deepStrictEqual(tilePoolSize(2, 300, 2096), {
@@ -160,6 +160,17 @@ describe('cpu budget presets', () => {
         heapMb: 256,
         reduced: true
       });
+    });
+
+    it('leaves room for the worker process outside its heap', () => {
+      // 1 GB free: the process takes its share before the heap gets half.
+      assert.deepStrictEqual(tilePoolSize(2, 1024, 2096), {
+        workers: 1,
+        heapMb: 462,
+        reduced: true
+      });
+      // A third worker fits only with room for its process too.
+      assert.strictEqual(tilePoolSize(4, 3 * 1536, 4144).workers, 2);
     });
 
     it('never raises the heap above the server heap limit', () => {

@@ -82,6 +82,12 @@ export function _computeBudgetForTests(preset: CpuBudgetPreset, cpus: number): R
  * cells, the densest measured, tiled in 1.4 GB with a 768 MB heap.
  */
 const TILE_WORKER_MEMORY_MB = 1536;
+/**
+ * What a worker process takes besides its heap and buffers: its own Node
+ * runtime and the isolate of the thread it runs tasks on. Measured peaks
+ * with processes were about 100 MB above those with threads.
+ */
+const WORKER_PROCESS_MB = 100;
 /** Below this a worker's heap holds too little to tile any band. */
 const MIN_TILE_HEAP_MB = 256;
 
@@ -98,9 +104,10 @@ export interface TilePoolSize {
  * budget's `workersPerJob`, and the heap each may grow to. V8 grows a heap
  * up to its limit before it collects in earnest, so without a lower limit
  * the workers together can take more than the host has, and the kernel then
- * kills the whole server rather than one task. Half of each worker's share
- * goes to the heap, at most the server's own limit; the rest is GDAL's and
- * the tiles' buffers, which live outside it.
+ * kills the whole server rather than one task. Of each worker's share, less
+ * its process (`WORKER_PROCESS_MB`), half goes to the heap, at most the
+ * server's own limit; the rest is GDAL's and the tiles' buffers, which live
+ * outside it.
  */
 export function tilePoolSize(
   workersPerJob: number,
@@ -109,9 +116,12 @@ export function tilePoolSize(
 ): TilePoolSize {
   const workers = Math.max(
     1,
-    Math.min(workersPerJob, Math.floor(availableMb / TILE_WORKER_MEMORY_MB))
+    Math.min(workersPerJob, Math.floor(availableMb / (TILE_WORKER_MEMORY_MB + WORKER_PROCESS_MB)))
   );
-  const heap = Math.max(MIN_TILE_HEAP_MB, Math.floor(availableMb / workers / 2));
+  const heap = Math.max(
+    MIN_TILE_HEAP_MB,
+    Math.floor((availableMb / workers - WORKER_PROCESS_MB) / 2)
+  );
   return { workers, heapMb: Math.min(heap, defaultHeapMb), reduced: heap < defaultHeapMb };
 }
 
