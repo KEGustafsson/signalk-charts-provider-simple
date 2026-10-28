@@ -7,7 +7,7 @@ export interface ResolvedBudget {
   /** Max number of conversion jobs that can run at the same time. */
   maxConcurrentConversions: number;
   /**
-   * Worker threads each WebAssembly conversion runs on (worker-pool.ts):
+   * Worker processes each WebAssembly conversion runs on (worker-pool.ts):
    * GDAL exports and tile shards, one per worker at a time.
    */
   workersPerJob: number;
