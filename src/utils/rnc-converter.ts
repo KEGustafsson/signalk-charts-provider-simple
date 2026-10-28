@@ -62,7 +62,7 @@ export function setConversionCompleted(chartNumber: string, message: string): vo
 export interface RncConversionOptions {
   /**
    * Aborting it kills the running container job (signalk-container >=
-   * 1.16.0) or terminates the conversion's worker threads; the conversion
+   * 1.16.0) or kills the conversion's worker processes; the conversion
    * then fails with CONVERSION_ABORTED_MESSAGE.
    */
   signal?: AbortSignal;
@@ -335,7 +335,7 @@ function reporter(chartNumber: string): ConversionReport {
 
 /**
  * The WebAssembly toolchain for `convertKapFiles`: GDAL tiles each chart on
- * the conversion's worker threads, then overview zooms are averaged from the
+ * the conversion's worker processes, then overview zooms are averaged from the
  * tiles below. Returns, per chart, whether its MBTiles was written.
  */
 async function convertKapFilesWithWasm(

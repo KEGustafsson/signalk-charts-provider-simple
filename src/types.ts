@@ -354,8 +354,8 @@ export interface S57ConversionOptions {
   isAborted?: () => boolean;
   /**
    * Optional abort signal. Aborting it kills the in-flight container job
-   * (signalk-container >= 1.16.0) or terminates the conversion's worker
-   * threads, stopping a GDAL export or tiling pass at once rather than at
+   * (signalk-container >= 1.16.0) or kills the conversion's worker
+   * processes, stopping a GDAL export or tiling pass at once rather than at
    * the next stage boundary.
    */
   signal?: AbortSignal;

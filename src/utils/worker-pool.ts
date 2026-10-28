@@ -1,16 +1,20 @@
 /**
- * The worker threads chart conversion runs on. Each conversion opens its own
- * pool and closes it when done, so the WASM heaps of its GDAL instances (which
- * never shrink) are released with it, and a cancel can stop work mid-task:
- * aborting the conversion's signal terminates every worker, which stops a
- * GDAL call or a tile shard at once rather than at the next boundary.
+ * The worker processes chart conversion runs on. Each conversion opens its
+ * own pool and closes it when done, so the memory its workers took (the WASM
+ * heaps of their GDAL instances, which never shrink, and the malloc arenas
+ * of their threads) goes back to the system with them, and a cancel can stop
+ * work mid-task: aborting the conversion's signal kills every worker, which
+ * stops a GDAL call or a tile shard at once rather than at the next boundary.
+ * Each worker is a child process running conversion-process.ts, which runs
+ * the task on a thread of its own (conversion-worker.ts).
  *
  * The pool's size is the conversion's share of the CPU budget
  * (concurrency.ts), and for tiling also what the free memory holds;
  * workers start on demand, so a one-file conversion starts one.
  */
 
-import { Worker } from 'node:worker_threads';
+import { fork, type ChildProcess } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import type {
   ConversionTask,
   TaskEvent,
@@ -18,6 +22,43 @@ import type {
   WorkerReply,
   WorkerRequest
 } from './conversion-worker.js';
+
+/** The end of a worker's stderr kept for the message of a worker that exits. */
+const STDERR_TAIL = 2048;
+
+const OUT_OF_MEMORY = /heap out of memory|Reached heap limit|reaching memory limit/i;
+
+/**
+ * Why a worker exited, for the task it was running: its heap limit when V8
+ * reported reaching it (`outOfMemory`, seen as stderr arrived, since V8's
+ * native stack trace can push the line out of the tail), else the last line
+ * it wrote to stderr.
+ */
+export function workerExitMessage(
+  code: number | null,
+  signal: string | null,
+  stderrTail: string,
+  heapMb: number | undefined,
+  outOfMemory: boolean
+): string {
+  const end = code === null ? `signal ${String(signal)}` : `code ${String(code)}`;
+  if (outOfMemory) {
+    const limit = heapMb === undefined ? 'its heap limit' : `its ${String(heapMb)} MB heap limit`;
+    return `Conversion worker stopped at ${limit} (exited with ${end})`;
+  }
+  const why = stderrTail.trim().split('\n').pop();
+  return `Conversion worker exited with ${end}${why ? `: ${why}` : ''}`;
+}
+
+/** Kill a worker at once; resolves once it has exited. */
+function kill(entry: PoolWorker): Promise<void> {
+  if (entry.worker.pid === undefined) {
+    // It never started, so it will not report an exit.
+    return Promise.resolve();
+  }
+  entry.worker.kill('SIGKILL');
+  return entry.exited;
+}
 
 /** Thrown for every task still pending when the pool's signal aborts. */
 export class PoolAbortedError extends Error {
@@ -40,20 +81,19 @@ export class TaskFailedError extends Error {
 
 interface Pending {
   task: ConversionTask;
-  transfer: ArrayBuffer[];
   onEvent?: (event: TaskEvent) => void;
   resolve: (result: TaskResult) => void;
   reject: (err: Error) => void;
 }
 
 interface PoolWorker {
-  worker: Worker;
+  worker: ChildProcess;
+  /** Resolves once the process has exited. */
+  exited: Promise<void>;
   current: (Pending & { id: number }) | null;
 }
 
 export interface RunOptions {
-  /** Buffers moved to the worker rather than copied. */
-  transfer?: ArrayBuffer[];
   /** Intermediate output of the task (tile batches, progress). */
   onEvent?: (event: TaskEvent) => void;
 }
@@ -91,7 +131,6 @@ export class WorkerPool {
     return new Promise((resolve, reject) => {
       this.queue.push({
         task,
-        transfer: options.transfer ?? [],
         onEvent: options.onEvent,
         resolve: resolve as (result: TaskResult) => void,
         reject
@@ -117,7 +156,7 @@ export class WorkerPool {
     for (const entry of this.workers.splice(0)) {
       entry.current?.reject(reason);
       entry.current = null;
-      this.stopping.push(entry.worker.terminate());
+      this.stopping.push(kill(entry));
     }
   }
 
@@ -137,16 +176,42 @@ export class WorkerPool {
       const id = this.nextId++;
       entry.current = { ...pending, id };
       const request: WorkerRequest = { id, task: pending.task };
-      entry.worker.postMessage(request, pending.transfer);
+      // A worker that cannot take it exits, and its exit fails the task.
+      entry.worker.send(request, () => undefined);
     }
   }
 
   private spawn(): PoolWorker {
-    const worker = new Worker(
-      new URL('./conversion-worker.js', import.meta.url),
-      this.heapMb === undefined ? {} : { resourceLimits: { maxOldGenerationSizeMb: this.heapMb } }
+    // The server's own V8 flags are not passed on, and a heap limit given
+    // here beats one in NODE_OPTIONS, so the worker's limit is the pool's.
+    // MALLOC_ARENA_MAX=2 bounds glibc's malloc arenas while the worker
+    // runs. Messages go through V8's serializer, so tile bytes arrive whole.
+    const heap = this.heapMb === undefined ? '' : String(this.heapMb);
+    const worker = fork(
+      fileURLToPath(new URL('./conversion-process.js', import.meta.url)),
+      [heap],
+      {
+        execArgv: heap === '' ? [] : [`--max-old-space-size=${heap}`],
+        env: { ...process.env, MALLOC_ARENA_MAX: '2' },
+        serialization: 'advanced',
+        stdio: ['ignore', 'inherit', 'pipe', 'ipc'],
+        windowsHide: true
+      }
     );
-    const entry: PoolWorker = { worker, current: null };
+    // The end of what the worker wrote to stderr, for the message of a
+    // worker that exits; all of it still reaches the server's log.
+    let stderrTail = '';
+    let outOfMemory = false;
+    worker.stderr?.setEncoding('utf8');
+    worker.stderr?.on('data', (text: string) => {
+      process.stderr.write(text);
+      const joined = stderrTail + text;
+      outOfMemory ||= OUT_OF_MEMORY.test(joined);
+      stderrTail = joined.slice(-STDERR_TAIL);
+    });
+    // 'close' rather than 'exit': only then has all of stderr been read.
+    const exited = new Promise<void>((resolve) => worker.once('close', () => resolve()));
+    const entry: PoolWorker = { worker, exited, current: null };
     this.workers.push(entry);
     worker.on('message', (reply: WorkerReply) => {
       const current = entry.current;
@@ -163,7 +228,7 @@ export class WorkerPool {
           this.workers.splice(this.workers.indexOf(entry), 1);
           entry.current = null;
           current.reject(err instanceof Error ? err : new Error('Task event failed'));
-          this.stopping.push(entry.worker.terminate());
+          this.stopping.push(kill(entry));
           if (!this.closed) {
             this.dispatch();
           }
@@ -178,7 +243,7 @@ export class WorkerPool {
       }
       this.dispatch();
     });
-    // A crashed worker (an aborted WASM instance, an out-of-memory heap)
+    // A crashed worker (an aborted WASM instance, a heap past its limit)
     // fails its task only, as a TaskFailedError like any other failed task,
     // so callers skip the one cell or chart; the next task gets a fresh
     // worker.
@@ -195,8 +260,8 @@ export class WorkerPool {
       }
     };
     worker.on('error', fail);
-    worker.on('exit', (code) => {
-      fail(new Error(`Conversion worker exited with code ${String(code)}`));
+    worker.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+      fail(new Error(workerExitMessage(code, signal, stderrTail, this.heapMb, outOfMemory)));
     });
     return entry;
   }

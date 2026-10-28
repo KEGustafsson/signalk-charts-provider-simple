@@ -7,7 +7,7 @@ export interface ResolvedBudget {
   /** Max number of conversion jobs that can run at the same time. */
   maxConcurrentConversions: number;
   /**
-   * Worker threads each WebAssembly conversion runs on (worker-pool.ts):
+   * Worker processes each WebAssembly conversion runs on (worker-pool.ts):
    * GDAL exports and tile shards, one per worker at a time.
    */
   workersPerJob: number;
@@ -82,60 +82,56 @@ export function _computeBudgetForTests(preset: CpuBudgetPreset, cpus: number): R
  * cells, the densest measured, tiled in 1.4 GB with a 768 MB heap.
  */
 const TILE_WORKER_MEMORY_MB = 1536;
+/**
+ * What a worker process takes besides its heap and buffers: its own Node
+ * runtime and the isolate of the thread it runs tasks on. Measured peaks
+ * with processes were about 100 MB above those with threads.
+ */
+const WORKER_PROCESS_MB = 100;
 /** Below this a worker's heap holds too little to tile any band. */
 const MIN_TILE_HEAP_MB = 256;
 
 export interface TilePoolSize {
   workers: number;
-  /** Old-generation limit of each worker; undefined leaves V8's default. */
-  heapMb: number | undefined;
+  /** Old-generation limit of each worker. */
+  heapMb: number;
+  /** Whether the heap is below the server's own limit: memory is short. */
+  reduced: boolean;
 }
 
 /**
  * How many tile workers fit in the memory that is free, at most the CPU
  * budget's `workersPerJob`, and the heap each may grow to. V8 grows a heap
- * up to its default limit before it collects in earnest, so without a
- * limit the workers together can take more than the host has, and the
- * kernel then kills the whole server rather than one task. Half of each
- * worker's share goes to the heap; the rest is GDAL's and the tiles'
- * buffers, which live outside it.
- *
- * A server started with `--max-old-space-size` gives every worker that
- * heap, and a worker's own limit cannot lower it (`heapFixed`), so each
- * worker then counts as twice that heap.
+ * up to its limit before it collects in earnest, so without a lower limit
+ * the workers together can take more than the host has, and the kernel then
+ * kills the whole server rather than one task. Of each worker's share, less
+ * its process (`WORKER_PROCESS_MB`), half goes to the heap, at most the
+ * server's own limit; the rest is GDAL's and the tiles' buffers, which live
+ * outside it.
  */
 export function tilePoolSize(
   workersPerJob: number,
   availableMb: number,
-  defaultHeapMb: number,
-  heapFixed = false
+  defaultHeapMb: number
 ): TilePoolSize {
-  const perWorkerMb = heapFixed
-    ? Math.max(TILE_WORKER_MEMORY_MB, 2 * defaultHeapMb)
-    : TILE_WORKER_MEMORY_MB;
-  const workers = Math.max(1, Math.min(workersPerJob, Math.floor(availableMb / perWorkerMb)));
-  if (heapFixed) {
-    return { workers, heapMb: undefined };
-  }
-  const heap = Math.max(MIN_TILE_HEAP_MB, Math.floor(availableMb / workers / 2));
-  return { workers, heapMb: heap < defaultHeapMb ? heap : undefined };
+  const workers = Math.max(
+    1,
+    Math.min(workersPerJob, Math.floor(availableMb / (TILE_WORKER_MEMORY_MB + WORKER_PROCESS_MB)))
+  );
+  const heap = Math.max(
+    MIN_TILE_HEAP_MB,
+    Math.floor((availableMb / workers - WORKER_PROCESS_MB) / 2)
+  );
+  return { workers, heapMb: Math.min(heap, defaultHeapMb), reduced: heap < defaultHeapMb };
 }
 
 const MB = 1024 * 1024;
-
-const HEAP_FLAG = '--max-old-space-size';
-
-/** Whether `flags` set the V8 heap limit; V8 reads `_` and `-` in a flag name alike. */
-export function setsHeapLimit(flags: readonly string[]): boolean {
-  return flags.some((flag) => flag.replace(/_/g, '-').startsWith(HEAP_FLAG));
-}
 
 /** `tilePoolSize` for this host now, within the live CPU budget. */
 export function getTilePoolSize(): TilePoolSize {
   return tilePoolSize(
     current.workersPerJob,
     process.availableMemory() / MB,
-    v8.getHeapStatistics().heap_size_limit / MB,
-    setsHeapLimit([...process.execArgv, ...(process.env.NODE_OPTIONS ?? '').split(/\s+/)])
+    Math.floor(v8.getHeapStatistics().heap_size_limit / MB)
   );
 }

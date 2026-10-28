@@ -396,7 +396,7 @@ function cellFileName(job: ArchiveJob): string {
 }
 
 /**
- * Read `cells` (paths relative to `dir`) with GDAL in a worker thread,
+ * Read `cells` (paths relative to `dir`) with GDAL in a worker process,
  * feeding its output to the report parser line by line: a cell without
  * coverage dumps every feature, too much to hold for a whole archive.
  */

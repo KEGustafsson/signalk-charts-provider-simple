@@ -1,8 +1,9 @@
 /**
- * Entry point of the chart conversion worker threads (worker-pool.ts). One
- * worker runs one task at a time: a GDAL call on its own WebAssembly GDAL
- * instance (gdal-wasm.ts, loaded on the worker's first GDAL task), one shard
- * of vector tiles (vector-tile-shard.ts), or one raster overview tile.
+ * The thread each chart conversion worker process runs its tasks on
+ * (worker-pool.ts, conversion-process.ts). One worker runs one task at a
+ * time: a GDAL call on its own WebAssembly GDAL instance (gdal-wasm.ts,
+ * loaded on the worker's first GDAL task), one shard of vector tiles
+ * (vector-tile-shard.ts), or one raster overview tile.
  */
 
 import fs from 'node:fs';

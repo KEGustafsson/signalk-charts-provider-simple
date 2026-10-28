@@ -1,5 +1,5 @@
 /**
- * Builds a vector MBTiles from GeoJSON, in worker threads — the plugin's own
+ * Builds a vector MBTiles from GeoJSON, in worker processes — the plugin's own
  * replacement for tippecanoe + tile-join.
  *
  * Input is a list of sources: GeoJSON files, the output layer they feed, and

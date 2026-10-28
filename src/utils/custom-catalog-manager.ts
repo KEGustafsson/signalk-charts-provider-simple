@@ -580,7 +580,7 @@ export function setCatalogDetail(id: string, detail: Partial<CustomCatalogProgre
 
 // Per-run abort controller. The flow registers one at start; cancel aborts it,
 // which kills the in-flight container job (signalk-container >= 1.16.0) or
-// terminates the conversion's worker threads mid-stage. The
+// kills the conversion's worker processes mid-stage. The
 // cancelRequested flag remains the boundary-cancel signal and the way the flow
 // distinguishes a cancel from a genuine failure.
 const abortControllers = new Map<string, AbortController>();
