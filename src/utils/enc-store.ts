@@ -10,8 +10,9 @@
  * the same disk), or the cells of an S-57 conversion, kept when the plugin's
  * `keepEncCells` option is on.
  *
- * Readers always see a cell whole: it is built in a staging dir and renamed
- * into place. A name starting with `.` is work in progress, never a cell or
+ * Readers see a cell whole or not at all: it is built in a staging dir and
+ * renamed into place, after its older copy is renamed aside, so for that
+ * instant the cell is missing. A name starting with `.` is work in progress, never a cell or
  * a collection. A cell whose files did not change keeps its files as they
  * are (names, sizes and modification times), so a reader that stamps cells
  * by them sees no change. Listeners hear of a collection once its write is
@@ -559,14 +560,21 @@ export async function removeCollection(id: string): Promise<boolean> {
   if (record === null) {
     return false;
   }
-  await serially(record.owner, () => {
+  // Read again once earlier writes and removals are done: another may have removed it.
+  const removed = await serially(record.owner, async () => {
+    if (readRecord(dir) === null) {
+      return false;
+    }
     // Renamed aside first, so readers find it whole or not at all.
     const gone = path.join(rootDir, `${WORK_PREFIX}removed-${id}-${String(Date.now())}`);
     fs.renameSync(dir, gone);
-    return fs.promises.rm(gone, { recursive: true, force: true });
+    await fs.promises.rm(gone, { recursive: true, force: true });
+    return true;
   });
-  emit(id);
-  return true;
+  if (removed) {
+    emit(id);
+  }
+  return removed;
 }
 
 /** Remove the collection `owner` wrote, if any. */
@@ -631,10 +639,17 @@ export function chartOwner(chartFile: string): string {
 /** The ids of the chart sets that have a collection. */
 export function chartSetCollections(): Map<string, string> {
   const result = new Map<string, string>();
-  for (const summary of listCollections()) {
-    const owner = collectionOwner(summary.id);
-    if (owner?.startsWith('chart-set:')) {
-      result.set(owner.slice('chart-set:'.length), summary.id);
+  let names: string[];
+  try {
+    names = fs.readdirSync(rootDir);
+  } catch {
+    return result;
+  }
+  // The records alone, without listing every cell's files.
+  for (const name of names.filter((n) => SAFE_ID.test(n)).sort()) {
+    const record = readRecord(path.join(rootDir, name));
+    if (record?.id === name && record.owner.startsWith('chart-set:')) {
+      result.set(record.owner.slice('chart-set:'.length), name);
     }
   }
   return result;

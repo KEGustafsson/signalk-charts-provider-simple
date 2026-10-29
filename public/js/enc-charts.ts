@@ -124,6 +124,18 @@ interface EncStoreCollection {
   dir: string;
 }
 
+interface EncStoreFile {
+  name: string;
+  bytes: number;
+  modified: string;
+}
+
+interface EncStoreCell {
+  name: string;
+  version?: string;
+  files: EncStoreFile[];
+}
+
 interface EncStoreResponse {
   root: string;
   keepEncCells: boolean;
@@ -1160,12 +1172,19 @@ async function loadCatalogs(): Promise<void> {
   await maybeStartStatusPoll();
 }
 
+// Shared ENC collections whose cells are listed, kept open across reloads.
+const ccSharedOpen = new Set<string>();
+
+// Only the latest list request renders, so an older answer can't bring back a removed row.
+let ccSharedLoad = 0;
+
 // The shared ENC store: the cells other plugins (Under-Keel Awareness) read.
 async function loadSharedCells(): Promise<void> {
   const el = document.getElementById('ccShared');
   if (!el) {
     return;
   }
+  const load = ++ccSharedLoad;
   let store: EncStoreResponse;
   try {
     const resp = await fetch(`${CC_API_BASE}/enc-store`);
@@ -1174,24 +1193,48 @@ async function loadSharedCells(): Promise<void> {
     }
     store = (await resp.json()) as EncStoreResponse;
   } catch {
+    if (load !== ccSharedLoad) {
+      return;
+    }
     el.innerHTML = `<div class="cc-detail-date">Could not read the shared ENC cells.</div>`;
     return;
   }
+  if (load !== ccSharedLoad) {
+    return;
+  }
+  for (const id of [...ccSharedOpen]) {
+    if (!store.collections.some((c) => c.id === id)) {
+      ccSharedOpen.delete(id);
+    }
+  }
   const rows = store.collections
-    .map(
-      (c) => `
-      <div class="cc-shared-row" title="${ccEscAttr(c.dir)}">
-        <span class="cc-list-name">${ccEscHtml(c.name)}</span>
-        <span class="cc-list-meta">${c.cellCount} cell(s), ${ccFormatSize(c.bytes)}</span>
-        ${
-          c.kind === 'conversion'
-            ? `<button class="cc-link-btn" data-cc-action="shared-delete" data-cc-collection="${ccEscAttr(
-                c.id
-              )}" title="Remove these cells; the chart stays">Remove</button>`
-            : `<span class="cc-shared-kind" title="Removed with its chart set">chart set</span>`
-        }
-      </div>`
-    )
+    .map((c) => {
+      const open = ccSharedOpen.has(c.id);
+      return `
+      <div class="cc-shared-item">
+        <div class="cc-shared-row" title="${ccEscAttr(c.dir)}">
+          <button class="cc-link-btn cc-shared-toggle" data-cc-action="shared-toggle" data-cc-collection="${ccEscAttr(
+            c.id
+          )}" aria-expanded="${open ? 'true' : 'false'}" title="${open ? 'Hide' : 'List'} its cells">${
+            open ? '▾' : '▸'
+          }</button>
+          <span class="cc-shared-main">
+            <span class="cc-list-name">${ccEscHtml(c.name)}</span>
+            <span class="cc-shared-meta">${c.cellCount} cell(s) · ${ccFormatSize(c.bytes)} · ${
+              c.kind === 'conversion' ? 'converted chart' : 'chart set'
+            }</span>
+          </span>
+          ${
+            c.kind === 'conversion'
+              ? `<button class="cc-link-btn" data-cc-action="shared-delete" data-cc-collection="${ccEscAttr(
+                  c.id
+                )}" title="Remove these cells; the chart stays">Remove</button>`
+              : ''
+          }
+        </div>
+        <div class="cc-shared-cells" data-cc-cells="${ccEscAttr(c.id)}"${open ? '' : ' hidden'}></div>
+      </div>`;
+    })
     .join('');
   el.innerHTML = `
     ${rows === '' ? `<div class="cc-detail-date">No ENC cells are shared yet.</div>` : `<div class="cc-shared-list">${rows}</div>`}
@@ -1204,6 +1247,63 @@ async function loadSharedCells(): Promise<void> {
           : 'To share the cells of charts converted in the Convert or Chart Catalog tab too, turn on “Keep the ENC cells of converted charts” in the plugin settings.'
       }
     </div>`;
+  await Promise.all([...ccSharedOpen].map((id) => loadSharedCellList(id)));
+}
+
+// List a collection's cells under its row: name, version, update files, size.
+async function loadSharedCellList(id: string): Promise<void> {
+  const el = document.querySelector<HTMLElement>(`[data-cc-cells="${CSS.escape(id)}"]`);
+  if (!el) {
+    return;
+  }
+  el.innerHTML = `<div class="cc-detail-date">Loading cells…</div>`;
+  let cells: EncStoreCell[];
+  try {
+    const resp = await fetch(`${CC_API_BASE}/enc-store/${encodeURIComponent(id)}`);
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}`);
+    }
+    cells = ((await resp.json()) as { cells: EncStoreCell[] }).cells;
+  } catch {
+    el.innerHTML = `<div class="cc-detail-date">Could not read the cells.</div>`;
+    return;
+  }
+  if (cells.length === 0) {
+    el.innerHTML = `<div class="cc-detail-date">No cells.</div>`;
+    return;
+  }
+  const base = `${CC_API_BASE}/enc-store/${encodeURIComponent(id)}`;
+  el.innerHTML = cells
+    .map((cell) => {
+      const files = cell.files
+        .map(
+          (f) =>
+            `<a href="${ccEscAttr(`${base}/${encodeURIComponent(cell.name)}/${encodeURIComponent(f.name)}`)}" download title="${ccEscAttr(
+              `${f.name}, ${ccFormatSize(f.bytes)}, ${new Date(f.modified).toLocaleString()}`
+            )}">${ccEscHtml(f.name.slice(f.name.lastIndexOf('.') + 1))}</a>`
+        )
+        .join(' ');
+      const bytes = cell.files.reduce((sum, f) => sum + f.bytes, 0);
+      return `<div class="cc-shared-cell">
+        <div class="cc-shared-cell-head">
+          <span class="cc-shared-cell-name">${ccEscHtml(cell.name)}</span>
+          <span class="cc-shared-meta">${ccFormatSize(bytes)}</span>
+        </div>
+        <div class="cc-shared-meta">${
+          cell.version ? `${ccEscHtml(cell.version)} · ` : ''
+        }files ${files}</div>
+      </div>`;
+    })
+    .join('');
+}
+
+function toggleSharedCells(id: string): void {
+  if (ccSharedOpen.has(id)) {
+    ccSharedOpen.delete(id);
+  } else {
+    ccSharedOpen.add(id);
+  }
+  void loadSharedCells();
 }
 
 async function removeSharedCells(id: string): Promise<void> {
@@ -1813,6 +1913,13 @@ function wireCustomCatalogHandlers(): void {
       case 'refresh-index':
         void loadEncIndex(true);
         break;
+      case 'shared-toggle': {
+        const id = actionEl.dataset['ccCollection'];
+        if (id) {
+          toggleSharedCells(id);
+        }
+        break;
+      }
       case 'shared-delete': {
         const id = actionEl.dataset['ccCollection'];
         if (id) {

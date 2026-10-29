@@ -249,6 +249,22 @@ describe('removeCollection', () => {
   });
 });
 
+describe('removeCollection, twice at once', () => {
+  it('removes it once and tells listeners once', async () => {
+    const a = makeCell(path.join(sourceDir, 'A'), 'FI5AAAAA');
+    await storeCollection(request({ cells: [{ base: a }] }));
+    const heard: string[] = [];
+    const unsubscribe = onEncStoreChange((id) => heard.push(id));
+    try {
+      const results = await Promise.all([removeCollection('Harbour'), removeCollection('Harbour')]);
+      assert.deepStrictEqual(results.sort(), [false, true]);
+      assert.deepStrictEqual(heard, ['Harbour']);
+    } finally {
+      unsubscribe();
+    }
+  });
+});
+
 describe('sweepEncStore', () => {
   it('removes work folders and collections without a record, once per process', () => {
     const root = encStoreRoot();

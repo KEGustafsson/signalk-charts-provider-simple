@@ -119,11 +119,11 @@ The interface provides seven tabs:
    - Out-of-date detection when a source publishes a new edition or update of a cell, or your selection changes; the set lists the cells that changed
    - Each chart set keeps its downloaded cells, so an update downloads and reads only the cells that changed before building the chart again. The set's details show how much disk they take; deleting the set frees it
    - Chart sets made in the NOAA Charts tab of earlier versions carry over as they are. A set that includes other sources still opens in an earlier version, which shows only its NOAA part and drops the rest if it saves the set
-   - **Shared ENC cells** lists the S-57 cells other plugins can read: every chart set's cells, and, with **Keep the ENC cells of converted charts** on in the plugin settings, the cells of each ENC chart converted in the Convert or Chart Catalog tab. Remove a converted chart's cells there; a chart set's go with the set. See [Shared ENC cells](#shared-enc-cells-for-other-plugins)
+   - **Shared ENC cells** lists the S-57 cells other plugins can read: every chart set's cells, and, with **Keep the ENC cells of converted charts** on in the plugin settings, the cells of each ENC chart converted in the Convert or Chart Catalog tab. Open a collection to list its cells with their versions and update files, each file downloadable. Remove a converted chart's cells there; a chart set's go with the set. See [Shared ENC cells](#shared-enc-cells-for-other-plugins)
 
 ### Shared ENC cells for other plugins
 
-The plugin keeps S-57 cells as delivered, `.000` with its `.001`, `.002`, … updates, in one place other Signal K plugins read from: `~/.signalk/plugin-config-data/signalk-charts-provider-simple/enc-store/`. Each chart's cells form a **collection**, one folder per cell:
+The plugin keeps S-57 cells as delivered, `.000` with its `.001`, `.002`, … updates, in one place other Signal K plugins read from: the `enc-store` folder in the plugin's data directory, by default `~/.signalk/plugin-config-data/signalk-charts-provider-simple/enc-store/`. Integrations take its location from the API's `root`. Each chart's cells form a **collection**, one folder per cell:
 
 ```
 enc-store/<collection>/<CELL>/<CELL>.000, <CELL>.001, …

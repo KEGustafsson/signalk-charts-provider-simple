@@ -4758,7 +4758,13 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
       // The set's downloaded cells and their GDAL output go with it, and so
       // does its share of the ENC store.
       removeSetCache(id);
-      void removeCollectionOf(chartSetOwner(id));
+      removeCollectionOf(chartSetOwner(id)).catch((err: unknown) => {
+        app.debug(
+          `Could not remove the shared cells of chart set ${id}: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      });
       cacheSizes.delete(id);
       // The produced .mbtiles (if any) is intentionally left in the chart
       // library — deleting the catalog definition is non-destructive. The user

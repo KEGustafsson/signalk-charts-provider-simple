@@ -31,8 +31,10 @@ already taken gets `-2`, `-3`, ….
 Guarantees for readers:
 
 - A cell is written in a work folder and renamed into place, so a reader sees
-  it whole, old or new. Names starting with `.` are work in progress: skip
-  them.
+  it whole or not at all: while a cell is replaced, its older copy is renamed
+  aside first, and for that instant the cell is missing. A reader that finds
+  one missing reads it again once told of the change. Names starting with `.`
+  are work in progress: skip them.
 - A cell whose files did not change keeps them as they are, names, sizes and
   modification times, so a reader that stamps cells by them sees no change.
 - Readers are told of a collection once its write is done (below).
@@ -41,22 +43,18 @@ Guarantees for readers:
 ## In-process API
 
 Plugins in the same Signal K server use
-`globalThis.__signalk_chartsProviderEnc` (type `ChartsProviderEncApi` in
-`src/types.ts`). It is published once the plugin has started and withdrawn
-when it stops; a peer plugin that starts first waits for it, or reads the
-layout above at the default path meanwhile.
+`globalThis.__signalk_chartsProviderEnc`, typed by `ChartsProviderEncApi` in
+[`src/types.ts`](../src/types.ts). It gives the store's `root`, the
+collections with their cells, and a change listener. It is published once the
+plugin has started and withdrawn when it stops; a peer plugin that starts
+first waits for it, or reads the layout above at the default path meanwhile.
+`root` is where the store is; the default path is only that, a default.
 
-```ts
-interface ChartsProviderEncApi {
-  apiVersion: number; // 1
-  root: string; // <dataDir>/enc-store
-  collections(): EncCollectionSummary[];
-  collection(id: string): EncCollection | null; // with each cell's files
-  onChange(listener: (collectionId: string) => void): () => void; // returns the unsubscribe
-}
-```
-
-A listener stays subscribed while the plugin restarts on a config save.
+Compatibility: `apiVersion` changes only with a change readers must know
+about, and a reader should not use an API of a version it does not know.
+Everything else grows by addition: new fields and methods, never a changed
+meaning. A listener stays subscribed while the plugin restarts on a config
+save.
 
 ## REST
 
