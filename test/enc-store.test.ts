@@ -22,6 +22,7 @@ import {
   onEncStoreChange,
   removeCollection,
   removeCollectionOf,
+  stageCollection,
   storeCollection,
   storedFilePath,
   sweepEncStore,
@@ -209,6 +210,57 @@ describe('storeCollection', () => {
       getCollection(one.id)?.cells.map((c) => c.name),
       ['FI5BBBBB']
     );
+  });
+});
+
+describe('stageCollection', () => {
+  it('changes the collection only on commit, keeping the files as they were', async () => {
+    const old = makeCell(path.join(sourceDir, 'old'), 'FI5AAAAA', [], 'old edition');
+    await storeCollection(request({ cells: [{ base: old }] }));
+    const a = makeCell(path.join(sourceDir, 'A'), 'FI5AAAAA', ['001'], 'new edition');
+    const b = makeCell(path.join(sourceDir, 'B'), 'FI5BBBBB');
+    const heard: string[] = [];
+    const unsubscribe = onEncStoreChange((id) => heard.push(id));
+    try {
+      const staged = await stageCollection(request({ cells: [{ base: a }, { base: b }] }));
+      assert.strictEqual(staged.staged, 2);
+      // The conversion's files go before the chart is installed.
+      fs.rmSync(sourceDir, { recursive: true, force: true });
+      const stored = path.join(encStoreRoot(), 'Harbour', 'FI5AAAAA', 'FI5AAAAA.000');
+      assert.strictEqual(fs.readFileSync(stored, 'utf8'), 'base old edition');
+      assert.deepStrictEqual(heard, []);
+
+      const result = await staged.commit();
+      assert.deepStrictEqual(result.written.sort(), ['FI5AAAAA', 'FI5BBBBB']);
+      assert.strictEqual(fs.readFileSync(stored, 'utf8'), 'base new edition');
+      assert.deepStrictEqual(
+        getCollection('Harbour')?.cells.map((c) => c.files.map((f) => f.name)),
+        [['FI5AAAAA.000', 'FI5AAAAA.001'], ['FI5BBBBB.000']]
+      );
+      assert.deepStrictEqual(heard, ['Harbour']);
+      await assert.rejects(staged.commit(), /already committed or discarded/);
+    } finally {
+      unsubscribe();
+    }
+    assert.deepStrictEqual(
+      fs.readdirSync(encStoreRoot()).filter((n) => n.startsWith('.')),
+      []
+    );
+  });
+
+  it('leaves the collection as it was when discarded', async () => {
+    const old = makeCell(path.join(sourceDir, 'old'), 'FI5AAAAA', [], 'old edition');
+    await storeCollection(request({ cells: [{ base: old }] }));
+    const a = makeCell(path.join(sourceDir, 'A'), 'FI5AAAAA', [], 'new edition');
+    const staged = await stageCollection(request({ cells: [{ base: a }], mode: 'copy' }));
+    staged.discard();
+    const stored = path.join(encStoreRoot(), 'Harbour', 'FI5AAAAA', 'FI5AAAAA.000');
+    assert.strictEqual(fs.readFileSync(stored, 'utf8'), 'base old edition');
+    assert.deepStrictEqual(
+      fs.readdirSync(encStoreRoot()).filter((n) => n.startsWith('.')),
+      []
+    );
+    await assert.rejects(staged.commit(), /already committed or discarded/);
   });
 });
 

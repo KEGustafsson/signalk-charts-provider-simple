@@ -550,6 +550,84 @@ export async function storeCollection(request: StoreCollectionRequest): Promise<
   return result;
 }
 
+/** Cells set aside for a collection until the chart they belong to is installed. */
+export interface StagedCollection {
+  /** Cells staged. */
+  staged: number;
+  /** Cells left out: a name that is not a cell's, or met twice. */
+  skipped: string[];
+  /** Make the collection hold the staged cells, as `storeCollection` does. The staging goes either way. */
+  commit: () => Promise<StoreResult>;
+  /** Drop the staged cells; the collection stays as it was. */
+  discard: () => void;
+}
+
+let stagings = 0;
+
+/**
+ * Set a collection's cells aside, linked or copied as `request.mode` says,
+ * without touching the collection: a conversion stages its cells while
+ * they are still on disk and commits them only once its chart is
+ * installed, so a cancelled or failed conversion leaves the collection
+ * matching the chart still installed. Staged cells keep their sources'
+ * modification times, and a commit hard links them into place.
+ */
+export async function stageCollection(request: StoreCollectionRequest): Promise<StagedCollection> {
+  stagings += 1;
+  const dir = path.join(
+    rootDir,
+    `${WORK_PREFIX}pending-${String(process.pid)}-${String(Date.now())}-${String(stagings)}`
+  );
+  fs.mkdirSync(dir, { recursive: true });
+  const cells: CellToStore[] = [];
+  const skipped: string[] = [];
+  try {
+    for (const cell of request.cells) {
+      const named = namedFiles(cell);
+      if (named === null || cells.some((c) => path.basename(c.base, '.000') === named.name)) {
+        skipped.push(path.basename(cell.base));
+        continue;
+      }
+      const cellDir = path.join(dir, named.name);
+      fs.mkdirSync(cellDir);
+      const files: string[] = [];
+      for (const [fileName, from] of named.files) {
+        const to = path.join(cellDir, fileName);
+        await placeFile(from, to, request.mode);
+        files.push(to);
+      }
+      const staged: CellToStore = { base: path.join(cellDir, `${named.name}.000`), files };
+      if (cell.version !== undefined) {
+        staged.version = cell.version;
+      }
+      cells.push(staged);
+    }
+  } catch (err) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw err;
+  }
+  let open = true;
+  const discard = (): void => {
+    open = false;
+    fs.rmSync(dir, { recursive: true, force: true });
+  };
+  return {
+    staged: cells.length,
+    skipped,
+    commit: async () => {
+      if (!open) {
+        throw new Error('These staged cells were already committed or discarded');
+      }
+      try {
+        return await storeCollection({ ...request, cells, mode: 'link' });
+      } finally {
+        discard();
+      }
+    },
+    discard
+  };
+}
+
 /** Remove a collection; false when there is none of that id. */
 export async function removeCollection(id: string): Promise<boolean> {
   if (!SAFE_ID.test(id)) {

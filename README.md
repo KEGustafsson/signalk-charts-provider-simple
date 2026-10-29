@@ -130,7 +130,7 @@ enc-store/<collection>/<CELL>/<CELL>.000, <CELL>.001, …
 ```
 
 - Every ENC Charts set is a collection, named like the set (`Gulf of Finland` → `Gulf_of_Finland`), kept current by each download & convert. Its cells are hard links to the set's own copy, so they take no extra disk.
-- With **Keep the ENC cells of converted charts** on, an ENC chart converted from an upload, a folder on the server or the Chart Catalog keeps its cells as a collection named after the chart file. Converting the chart again replaces them.
+- With **Keep the ENC cells of converted charts** on, an ENC chart converted from an upload, a folder on the server or the Chart Catalog keeps its cells as a collection named after the chart file. Converting the chart again replaces them once the new chart is installed; a cancelled or failed conversion leaves them as they were.
 
 [Under-Keel Awareness](https://www.npmjs.com/package/signalk-underkeel) reads them in place: pick the collection in its **ENC from Charts Provider** setting, and it builds its depth index again when the cells change. Other plugins use the in-process API or the REST routes in [`docs/enc-store.md`](docs/enc-store.md).
 

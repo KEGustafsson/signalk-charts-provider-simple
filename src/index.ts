@@ -204,9 +204,11 @@ import {
   onEncStoreChange,
   removeCollection,
   removeCollectionOf,
+  stageCollection,
   storeCollection,
   storedFilePath,
-  sweepEncStore
+  sweepEncStore,
+  type StagedCollection
 } from './utils/enc-store.js';
 import {
   appendCatalogLog,
@@ -4107,6 +4109,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
           const controller = new AbortController();
           conversionAborts.set(chartNumber, controller);
           res.json({ success: true, chartNumber, message: 'Conversion started' });
+          const keeper = cellKeeper('upload', undefined);
 
           try {
             if (convType === 's57') {
@@ -4121,13 +4124,14 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
                   minzoom,
                   maxzoom,
                   signal: controller.signal,
-                  keepCells: keepCellsFor('upload', undefined)
+                  keepCells: keeper.keepCells
                 }
               );
 
               controller.signal.throwIfAborted();
               conversionAborts.delete(chartNumber);
               await installConvertedCharts(quarantineDir, [result.mbtilesFile], chartPath);
+              await keeper.commit();
               app.debug(`Convert complete: ${chartNumber} → ${result.mbtilesFile}`);
             } else if (convType === 'rnc') {
               const result = await processRncZip(
@@ -4155,6 +4159,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
               );
             }
           } finally {
+            keeper.discard();
             conversionAborts.delete(chartNumber);
             setConvertingState(chartNumber, false);
             cleanupQuarantineDir(quarantineDir);
@@ -4264,6 +4269,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         const onStatus = (status: string, message: string): void => {
           app.debug(`Convert [${chartNumber}] ${status}: ${message}`);
         };
+        const keeper = cellKeeper('local', undefined);
         try {
           if (isS57) {
             const result = await processS57Local(
@@ -4276,12 +4282,13 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
                 minzoom,
                 maxzoom,
                 signal: controller.signal,
-                keepCells: keepCellsFor('local', undefined)
+                keepCells: keeper.keepCells
               }
             );
             controller.signal.throwIfAborted();
             conversionAborts.delete(chartNumber);
             await installConvertedCharts(quarantineDir, [result.mbtilesFile], chartPath);
+            await keeper.commit();
             app.debug(`Convert complete: ${chartNumber} → ${result.mbtilesFile}`);
           } else {
             const result = await processRncLocal(
@@ -4307,6 +4314,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
             );
           }
         } finally {
+          keeper.discard();
           conversionAborts.delete(chartNumber);
           setConvertingState(chartNumber, false);
           cleanupQuarantineDir(quarantineDir);
@@ -4921,10 +4929,11 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
       // guarded try so a sync throw (perms, disk full) goes through
       // the same cleanup as a conversion failure.
       let quarantineDir: string | null = null;
+      const displayName = chartTitle ? cleanCatalogTitle(chartTitle) : undefined;
+      const keeper = cellKeeper('catalog', displayName || undefined);
 
       try {
         quarantineDir = makeUniqueQuarantineDir(app.getDataDirPath(), chartNumber);
-        const displayName = chartTitle ? cleanCatalogTitle(chartTitle) : undefined;
         const result = await processS57Zip(
           zipPath,
           quarantineDir,
@@ -4937,7 +4946,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
             maxzoom,
             displayName: displayName || undefined,
             displayDescription: chartTitle || undefined,
-            keepCells: keepCellsFor('catalog', displayName || undefined)
+            keepCells: keeper.keepCells
           }
         );
 
@@ -4946,6 +4955,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         // dropped and the user sees the catalog row return to
         // "Download & Convert".
         await promoteQuarantine(quarantineDir, [result.mbtilesFile], targetDir);
+        await keeper.commit();
 
         setConvertingState(chartNumber, false);
         cleanupQuarantineDir(quarantineDir);
@@ -4969,6 +4979,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         app.error(
           `S-57 conversion failed for ${chartNumber}: ${convError instanceof Error ? convError.message : String(convError)}`
         );
+        keeper.discard();
         rollbackInstall(chartNumber);
         setConvertingState(chartNumber, false);
         if (quarantineDir !== null) {
@@ -5347,30 +5358,60 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
 
   // The S-57 cells of a converted chart, kept in the shared ENC store when
   // `keepEncCells` is on, under the chart's file name: converting the chart
-  // again replaces them. Cells from a folder on the server are copied, as a
-  // hard link would share the user's own file.
-  function keepCellsFor(
+  // again replaces them. They are staged while the conversion's files are
+  // on disk and replace the collection only once the chart is installed, so
+  // a cancelled or failed conversion leaves the collection matching the
+  // chart still installed. Cells from a folder on the server are copied, as
+  // a hard link would share the user's own file.
+  interface CellKeeper {
+    keepCells: S57ConversionOptions['keepCells'];
+    /** After the chart is installed; never fails the caller. */
+    commit: () => Promise<void>;
+    /** When the conversion ends any other way. */
+    discard: () => void;
+  }
+  function cellKeeper(
     source: 'upload' | 'catalog' | 'local',
     name: string | undefined
-  ): S57ConversionOptions['keepCells'] {
+  ): CellKeeper {
     if (props.keepEncCells !== true) {
-      return undefined;
+      return { keepCells: undefined, commit: () => Promise.resolve(), discard: () => {} };
     }
-    return async (cells, mbtilesFile) => {
-      const result = await storeCollection({
-        owner: chartOwner(mbtilesFile),
-        preferredId: mbtilesFile,
-        name: name ?? mbtilesFile.replace(/\.mbtiles$/, ''),
-        kind: 'conversion',
-        chart: mbtilesFile,
-        source,
-        cells: cells.map((base) => ({ base })),
-        mode: source === 'local' ? 'copy' : 'link'
-      });
-      return (
-        `Kept ${String(cells.length - result.skipped.length)} ENC cell(s) for other plugins ` +
-        `in the shared ENC store as "${result.id}"`
-      );
+    let staged: StagedCollection | null = null;
+    return {
+      keepCells: async (cells, mbtilesFile) => {
+        staged?.discard();
+        staged = await stageCollection({
+          owner: chartOwner(mbtilesFile),
+          preferredId: mbtilesFile,
+          name: name ?? mbtilesFile.replace(/\.mbtiles$/, ''),
+          kind: 'conversion',
+          chart: mbtilesFile,
+          source,
+          cells: cells.map((base) => ({ base })),
+          mode: source === 'local' ? 'copy' : 'link'
+        });
+        return `Keeping ${String(staged.staged)} ENC cell(s) for other plugins once the chart is installed`;
+      },
+      commit: async () => {
+        const pending = staged;
+        staged = null;
+        if (pending === null) {
+          return;
+        }
+        try {
+          const result = await pending.commit();
+          app.debug(`Kept the ENC cells in the shared ENC store as "${result.id}"`);
+        } catch (err) {
+          app.error(
+            `Could not keep the ENC cells: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      },
+      discard: () => {
+        staged?.discard();
+        staged = null;
+      }
     };
   }
 
