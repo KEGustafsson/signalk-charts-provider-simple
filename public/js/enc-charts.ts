@@ -111,6 +111,25 @@ interface CatalogProgressDetail {
   coverageByBox?: Record<string, string[]>;
 }
 
+/** A collection of the shared ENC store: the cells behind one chart. */
+interface EncStoreCollection {
+  id: string;
+  name: string;
+  kind: 'chart-set' | 'conversion';
+  chart?: string;
+  source: string;
+  cellCount: number;
+  bytes: number;
+  updatedAt: string;
+  dir: string;
+}
+
+interface EncStoreResponse {
+  root: string;
+  keepEncCells: boolean;
+  collections: EncStoreCollection[];
+}
+
 interface CatalogStatusResponse extends CustomCatalog {
   busy: boolean;
   progress: CatalogProgress | null;
@@ -195,6 +214,8 @@ async function initCustomCatalogsTab(): Promise<void> {
         <div id="ccDetail" class="cc-detail"></div>
         <div id="ccProgress" class="cc-progress"></div>
         <pre id="ccLog" class="cc-log" style="display:none;"></pre>
+        <div class="cc-list-header cc-shared-header">Shared ENC cells</div>
+        <div id="ccShared" class="cc-shared"></div>
       </div>
       <div class="cc-right">
         <div class="cc-map-note">
@@ -1135,7 +1156,72 @@ async function loadCatalogs(): Promise<void> {
   renderCustomCatalogList();
   renderDetail();
   refreshAreaColors();
+  void loadSharedCells();
   await maybeStartStatusPoll();
+}
+
+// The shared ENC store: the cells other plugins (Under-Keel Awareness) read.
+async function loadSharedCells(): Promise<void> {
+  const el = document.getElementById('ccShared');
+  if (!el) {
+    return;
+  }
+  let store: EncStoreResponse;
+  try {
+    const resp = await fetch(`${CC_API_BASE}/enc-store`);
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}`);
+    }
+    store = (await resp.json()) as EncStoreResponse;
+  } catch {
+    el.innerHTML = `<div class="cc-detail-date">Could not read the shared ENC cells.</div>`;
+    return;
+  }
+  const rows = store.collections
+    .map(
+      (c) => `
+      <div class="cc-shared-row" title="${ccEscAttr(c.dir)}">
+        <span class="cc-list-name">${ccEscHtml(c.name)}</span>
+        <span class="cc-list-meta">${c.cellCount} cell(s), ${ccFormatSize(c.bytes)}</span>
+        ${
+          c.kind === 'conversion'
+            ? `<button class="cc-link-btn" data-cc-action="shared-delete" data-cc-collection="${ccEscAttr(
+                c.id
+              )}" title="Remove these cells; the chart stays">Remove</button>`
+            : `<span class="cc-shared-kind" title="Removed with its chart set">chart set</span>`
+        }
+      </div>`
+    )
+    .join('');
+  el.innerHTML = `
+    ${rows === '' ? `<div class="cc-detail-date">No ENC cells are shared yet.</div>` : `<div class="cc-shared-list">${rows}</div>`}
+    <div class="cc-detail-date">
+      Other plugins, such as Under-Keel Awareness, read these cells as delivered from
+      <code>${ccEscHtml(store.root)}</code>. The cells of every chart set are shared.
+      ${
+        store.keepEncCells
+          ? 'Converted ENC charts keep their cells here too.'
+          : 'To share the cells of charts converted in the Convert or Chart Catalog tab too, turn on “Keep the ENC cells of converted charts” in the plugin settings.'
+      }
+    </div>`;
+}
+
+async function removeSharedCells(id: string): Promise<void> {
+  if (!confirm('Remove these shared ENC cells? Charts built from them are kept.')) {
+    return;
+  }
+  try {
+    const resp = await fetch(`${CC_API_BASE}/enc-store/${encodeURIComponent(id)}`, {
+      method: 'DELETE'
+    });
+    if (!resp.ok) {
+      const body = (await resp.json().catch(() => ({}))) as { error?: string };
+      alert(`Could not remove: ${body.error ?? `HTTP ${resp.status}`}`);
+    }
+  } catch {
+    alert('Could not remove the cells. Check your connection.');
+  }
+  await loadSharedCells();
 }
 
 function renderCustomCatalogList(): void {
@@ -1727,6 +1813,13 @@ function wireCustomCatalogHandlers(): void {
       case 'refresh-index':
         void loadEncIndex(true);
         break;
+      case 'shared-delete': {
+        const id = actionEl.dataset['ccCollection'];
+        if (id) {
+          void removeSharedCells(id);
+        }
+        break;
+      }
       default:
         break;
     }

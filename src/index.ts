@@ -176,6 +176,7 @@ import {
   isS57Update
 } from './utils/local-chart-source.js';
 import {
+  cachedCellSources,
   cachedGeojsonFor,
   cellsDir,
   createStagingDir,
@@ -189,6 +190,24 @@ import {
   updateSetCache
 } from './utils/chart-set-cache.js';
 import { gdalBuildId } from './utils/gdal-wasm.js';
+import {
+  chartOwner,
+  chartSetCollections,
+  chartSetOwner,
+  collectionOwner,
+  ENC_STORE_API_VERSION,
+  encStoreRoot,
+  getCollection,
+  initEncStore,
+  isValidCollectionId,
+  listCollections,
+  onEncStoreChange,
+  removeCollection,
+  removeCollectionOf,
+  storeCollection,
+  storedFilePath,
+  sweepEncStore
+} from './utils/enc-store.js';
 import {
   appendCatalogLog,
   boxStatesForCatalog,
@@ -225,6 +244,7 @@ import { downloadAndExtractEncs } from './utils/custom-catalog-download.js';
 import packageJson from '../package.json' with { type: 'json' };
 import type {
   ChartProvider,
+  ChartsProviderEncGlobal,
   ChartsProviderRefreshGlobal,
   DownloadJob,
   ExtendedServerAPI,
@@ -232,6 +252,7 @@ import type {
   PluginConfig,
   Request,
   Response,
+  S57ConversionOptions,
   SanitizedChart
 } from './types.js';
 const pluginVersion: string = (packageJson as { version: string }).version;
@@ -531,6 +552,20 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
             'Turn this on to keep fetching (and keeping) online chart tiles on a metered connection. ' +
             'Offline or behind a sign-in page nothing is fetched either way; downloads you start yourself always run.',
           default: false
+        },
+        _encStoreHeader: {
+          type: 'null',
+          title: 'Shared ENC cells'
+        },
+        keepEncCells: {
+          type: 'boolean',
+          title: 'Keep the ENC cells of converted charts',
+          description:
+            'Keep the S-57 cells of every ENC chart converted from an upload, a folder on the server or the Chart Catalog ' +
+            'in the shared ENC store, as delivered, where other plugins such as signalk-underkeel read them. ' +
+            'The cells of ENC Charts sets are always shared, without taking extra space. ' +
+            'Kept cells take about as much space as the unzipped download; remove them in the ENC Charts tab.',
+          default: false
         }
       }
     }),
@@ -571,8 +606,9 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         clearInterval(catalogUpdateInterval);
         catalogUpdateInterval = null;
       }
-      // Withdraw the peer-plugin refresh hook (see doStartup).
+      // Withdraw the peer-plugin refresh hook and ENC store (see doStartup).
       delete (globalThis as unknown as ChartsProviderRefreshGlobal).__signalk_chartsProviderRefresh;
+      delete (globalThis as unknown as ChartsProviderEncGlobal).__signalk_chartsProviderEnc;
       // Release sqlite handles: on Windows an open handle keeps the
       // .mbtiles file locked, and Signal K restarts the plugin on every
       // config save, which would otherwise leak the whole map each time.
@@ -899,6 +935,13 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     if (savedSetIds !== null && savedSetIds.every((setId) => !isCatalogBusy(setId))) {
       sweepChartSetCache(new Set(savedSetIds));
     }
+    initEncStore(dataDir, app.debug.bind(app));
+    for (const name of sweepEncStore()) {
+      app.debug(`Removed leftover ENC store work folder: ${name}`);
+    }
+    if (savedSetIds !== null) {
+      void shareChartSets(savedSetIds);
+    }
     // The startup round waits for signalk-internet's first state, when that
     // plugin is enabled, so a restart on a metered link downloads nothing.
     void gate.firstStateKnown().then(() => {
@@ -1006,6 +1049,16 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         }
         return Object.keys(chartProviders).length;
       };
+
+    // The shared ENC store for peer plugins, such as signalk-underkeel,
+    // which read its cells in place: the same in-process hand-off.
+    (globalThis as unknown as ChartsProviderEncGlobal).__signalk_chartsProviderEnc = {
+      apiVersion: ENC_STORE_API_VERSION,
+      root: encStoreRoot(),
+      collections: listCollections,
+      collection: getCollection,
+      onChange: onEncStoreChange
+    };
 
     // Wipe any quarantine subdirs left behind by a previous server
     // lifecycle. Conversions write into <dataDir>/in-progress/<chartNumber>/
@@ -4064,7 +4117,12 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
                 (status, message) => {
                   app.debug(`Convert [${chartNumber}] ${status}: ${message}`);
                 },
-                { minzoom, maxzoom, signal: controller.signal }
+                {
+                  minzoom,
+                  maxzoom,
+                  signal: controller.signal,
+                  keepCells: keepCellsFor('upload', undefined)
+                }
               );
 
               controller.signal.throwIfAborted();
@@ -4214,7 +4272,12 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
               quarantineDir,
               chartNumber,
               onStatus,
-              { minzoom, maxzoom, signal: controller.signal }
+              {
+                minzoom,
+                maxzoom,
+                signal: controller.signal,
+                keepCells: keepCellsFor('local', undefined)
+              }
             );
             controller.signal.throwIfAborted();
             conversionAborts.delete(chartNumber);
@@ -4501,6 +4564,81 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
       }
     });
 
+    // ---- Shared ENC store ----
+    // The S-57 cells kept for other plugins (see utils/enc-store.ts), as
+    // collections of cells: a chart set's, or a converted chart's. Peer
+    // plugins in this server use `globalThis.__signalk_chartsProviderEnc`;
+    // these routes serve the same to clients elsewhere, and to the UI.
+
+    router.get('/enc-store', (_req: Request, res: Response) => {
+      res.json({
+        apiVersion: ENC_STORE_API_VERSION,
+        root: encStoreRoot(),
+        keepEncCells: props.keepEncCells === true,
+        collections: listCollections()
+      });
+    });
+
+    router.get('/enc-store/:collection', (req: Request, res: Response) => {
+      const collection = getCollection((req.params as Record<string, string>).collection);
+      if (!collection) {
+        res.status(404).json({ error: 'ENC collection not found' });
+        return;
+      }
+      res.json(collection);
+    });
+
+    router.get('/enc-store/:collection/:cell/:file', (req: Request, res: Response) => {
+      const { collection, cell, file } = req.params as Record<string, string>;
+      const full = storedFilePath(collection, cell, file);
+      if (full === null) {
+        res.status(404).json({ error: 'ENC file not found' });
+        return;
+      }
+      // The data dir is normally under ~/.signalk, which send() would
+      // refuse as a dotfile; the path was checked above.
+      res.sendFile(
+        full,
+        { dotfiles: 'allow', headers: { 'Content-Type': 'application/octet-stream' } },
+        (err?: Error) => {
+          if (err && !res.headersSent) {
+            res.status(404).json({ error: 'ENC file not found' });
+          }
+        }
+      );
+    });
+
+    // A chart set's collection goes with the set, in the ENC Charts tab.
+    router.delete('/enc-store/:collection', (req: Request, res: Response) => {
+      const id = (req.params as Record<string, string>).collection;
+      if (!isValidCollectionId(id)) {
+        res.status(400).json({ success: false, error: 'Invalid ENC collection id' });
+        return;
+      }
+      if (collectionOwner(id)?.startsWith('chart-set:')) {
+        res.status(409).json({
+          success: false,
+          error: 'These are the cells of a chart set; delete the chart set to remove them'
+        });
+        return;
+      }
+      void removeCollection(id).then(
+        (removed) => {
+          if (removed) {
+            res.json({ success: true });
+          } else {
+            res.status(404).json({ success: false, error: 'ENC collection not found' });
+          }
+        },
+        (err: unknown) => {
+          res.status(500).json({
+            success: false,
+            error: err instanceof Error ? err.message : String(err)
+          });
+        }
+      );
+    });
+
     // ---- Chart sets (the ENC Charts tab) ----
     // Build a named bundle of ENC units picked on a map of the ENC index
     // (NOAA band-4 boxes and every other source's cells), then download
@@ -4617,8 +4755,10 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         res.status(404).json({ error: 'Custom catalog not found' });
         return;
       }
-      // The set's downloaded cells and their GDAL output go with it.
+      // The set's downloaded cells and their GDAL output go with it, and so
+      // does its share of the ENC store.
       removeSetCache(id);
+      void removeCollectionOf(chartSetOwner(id));
       cacheSizes.delete(id);
       // The produced .mbtiles (if any) is intentionally left in the chart
       // library — deleting the catalog definition is non-destructive. The user
@@ -4790,7 +4930,8 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
             minzoom,
             maxzoom,
             displayName: displayName || undefined,
-            displayDescription: chartTitle || undefined
+            displayDescription: chartTitle || undefined,
+            keepCells: keepCellsFor('catalog', displayName || undefined)
           }
         );
 
@@ -5198,6 +5339,92 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     }
   }
 
+  // The S-57 cells of a converted chart, kept in the shared ENC store when
+  // `keepEncCells` is on, under the chart's file name: converting the chart
+  // again replaces them. Cells from a folder on the server are copied, as a
+  // hard link would share the user's own file.
+  function keepCellsFor(
+    source: 'upload' | 'catalog' | 'local',
+    name: string | undefined
+  ): S57ConversionOptions['keepCells'] {
+    if (props.keepEncCells !== true) {
+      return undefined;
+    }
+    return async (cells, mbtilesFile) => {
+      const result = await storeCollection({
+        owner: chartOwner(mbtilesFile),
+        preferredId: mbtilesFile,
+        name: name ?? mbtilesFile.replace(/\.mbtiles$/, ''),
+        kind: 'conversion',
+        chart: mbtilesFile,
+        source,
+        cells: cells.map((base) => ({ base })),
+        mode: source === 'local' ? 'copy' : 'link'
+      });
+      return (
+        `Kept ${String(cells.length - result.skipped.length)} ENC cell(s) for other plugins ` +
+        `in the shared ENC store as "${result.id}"`
+      );
+    };
+  }
+
+  // Share a chart set's kept cells in the ENC store, hard linked from its
+  // cache; a set without cells has no collection. Never fails the caller.
+  async function shareChartSet(setId: string, name: string, chart: string | null): Promise<void> {
+    try {
+      const cells = cachedCellSources(setId);
+      if (cells.length === 0) {
+        await removeCollectionOf(chartSetOwner(setId));
+        return;
+      }
+      const result = await storeCollection({
+        owner: chartSetOwner(setId),
+        preferredId: setId,
+        name,
+        kind: 'chart-set',
+        ...(chart !== null ? { chart } : {}),
+        source: 'chart-set',
+        cells,
+        mode: 'link'
+      });
+      if (result.written.length > 0 || result.removed.length > 0) {
+        app.debug(
+          `ENC store ${result.id}: ${String(result.written.length)} cell(s) written, ` +
+            `${String(result.removed.length)} removed`
+        );
+      }
+    } catch (err) {
+      app.debug(
+        `Could not share the cells of chart set ${setId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    }
+  }
+
+  // At start: share every saved set not being built (sets kept by a version
+  // without the ENC store get their collection), and drop the collections
+  // of sets deleted since.
+  async function shareChartSets(savedSetIds: readonly string[]): Promise<void> {
+    const saved = new Set(savedSetIds);
+    for (const [setId, collectionId] of chartSetCollections()) {
+      if (!saved.has(setId)) {
+        await removeCollection(collectionId).catch((err: unknown) => {
+          app.debug(
+            `Could not remove the shared cells of deleted chart set ${setId}: ${
+              err instanceof Error ? err.message : String(err)
+            }`
+          );
+        });
+      }
+    }
+    for (const catalog of listCustomCatalogs()) {
+      if (!isCatalogBusy(catalog.id)) {
+        await shareChartSet(catalog.id, catalog.name, catalog.convertedChartPath);
+      }
+    }
+  }
+
   // A set's cache size, read at most once a minute and not while a run is
   // changing it: the status route asks every two seconds during a run.
   const cacheSizes = new Map<string, { bytes: number; at: number }>();
@@ -5463,6 +5690,8 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
             log: (line) => appendCatalogLog(id, line)
           }
         );
+        // Other plugins read the set's cells as soon as they are current.
+        await shareChartSet(id, catalog.name, catalog.convertedChartPath);
         // Nothing to download or read again and the chart already built from
         // exactly these cells: building it again would give the same file.
         const chartFile =
@@ -5603,6 +5832,8 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         // the UI flags it for a rebuild (which retries the failed cells).
         catalog.status = partialDownload ? 'out_of_date' : 'converted';
         saveCustomCatalog(catalog);
+        // Names the chart now built from the set's shared cells.
+        await shareChartSet(id, catalog.name, catalog.convertedChartPath);
 
         await refreshChartProviders();
         const chartId = conv.mbtilesFile.replace(/\.mbtiles$/, '');

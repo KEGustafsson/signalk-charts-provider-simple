@@ -279,6 +279,40 @@
   color: var(--md-sys-color-error, #ba1a1a);
 }
 
+/* Shared ENC cells, under the chart set's log. */
+.cc-shared-header {
+  margin-top: 16px;
+}
+
+.cc-shared-list {
+  border: 1px solid var(--md-sys-color-outline-variant, #c3c7cf);
+  border-radius: 10px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.cc-shared-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--md-sys-color-outline-variant, #e2e4e9);
+}
+
+.cc-shared-row:last-child {
+  border-bottom: none;
+}
+
+.cc-shared-kind {
+  flex: 0 0 auto;
+  font-size: 0.8rem;
+  color: var(--md-sys-color-on-surface-variant, #43474e);
+}
+
+.cc-shared code {
+  overflow-wrap: anywhere;
+}
+
 .cc-link-btn {
   border: none;
   background: none;
