@@ -31,6 +31,8 @@ export const ENC_STORE_API_VERSION = 1;
 const STORE_DIR_NAME = 'enc-store';
 const COLLECTION_FILE = 'collection.json';
 const WORK_PREFIX = '.';
+/** The owner prefix of a collection no longer tied to a chart. */
+const DETACHED_OWNER = 'detached:';
 const SAFE_ID = /^[A-Za-z0-9_-]{1,80}$/;
 const SAFE_CELL = /^[A-Za-z0-9_-]{1,64}$/;
 /** A cell's own files: the base cell and its numbered updates. */
@@ -100,7 +102,7 @@ export interface CellToStore {
 }
 
 export interface StoreCollectionRequest {
-  /** Who the collection belongs to, e.g. `chart-set:<id>` or `chart:<file>`. */
+  /** Who the collection belongs to: `chart-set:<id>`, `chart:<file>` or `detached:<id>`. */
   owner: string;
   /** The id wanted; another owner's collection of that id gets `-2`, `-3`, … instead. */
   preferredId: string;
@@ -664,35 +666,52 @@ export async function removeCollectionOf(owner: string): Promise<void> {
 }
 
 /**
- * A converted chart moved or renamed in the chart folder, from `from` to `to`
- * (relative to the chart path): its collection follows it, so a chart
- * converted later at the old path does not replace it. A collection left
- * at `to` by a chart no longer there goes, as a conversion there would
- * replace it. False when the chart has no collection.
+ * Give the collection `owner` wrote, if any, the owner `next(id)` and that
+ * chart, after the owner's earlier writes. Its id when it changed.
  */
-export async function moveChartCollection(from: string, to: string): Promise<boolean> {
-  const owner = chartOwner(from);
+async function reassign(
+  owner: string,
+  next: (id: string) => string,
+  chart: string | undefined
+): Promise<string | null> {
   const id = collectionOf(owner);
   if (id === null) {
-    return false;
-  }
-  const left = collectionOf(chartOwner(to));
-  if (left !== null && left !== id) {
-    await removeCollection(left);
+    return null;
   }
   const dir = collectionDir(id);
-  const moved = await serially(owner, () => {
+  const done = await serially(owner, () => {
     const record = readRecord(dir);
     if (record?.owner !== owner) {
       return Promise.resolve(false);
     }
-    writeRecord(dir, { ...record, owner: chartOwner(to), chart: to });
+    const { chart: _was, ...rest } = record;
+    writeRecord(
+      dir,
+      chart === undefined ? { ...rest, owner: next(id) } : { ...rest, owner: next(id), chart }
+    );
     return Promise.resolve(true);
   });
-  if (moved) {
-    emit(id);
+  if (!done) {
+    return null;
   }
-  return moved;
+  emit(id);
+  return id;
+}
+
+/**
+ * A chart moved or renamed in the chart folder, from `from` to `to` (relative
+ * to the chart path). Its collection, if any, follows it, so a chart
+ * converted later at the old path does not replace it. A collection still
+ * tied to `to` belongs to a chart no longer there: it keeps its cells, which
+ * readers may be using, until the user removes them, but is no longer tied
+ * to that path. False when the chart has no collection.
+ */
+export async function moveChartCollection(from: string, to: string): Promise<boolean> {
+  if (from === to) {
+    return false;
+  }
+  await reassign(chartOwner(to), (id) => `${DETACHED_OWNER}${id}`, undefined);
+  return (await reassign(chartOwner(from), () => chartOwner(to), to)) !== null;
 }
 
 /** The owner of the collection of this id, or null. */

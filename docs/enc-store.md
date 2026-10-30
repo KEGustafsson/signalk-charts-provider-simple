@@ -26,7 +26,9 @@ install. A **collection** is the cells behind one chart:
 
 A converted chart's collection belongs to the chart's path in the chart
 folder: it follows the chart when the chart is moved or renamed, and a chart
-converted to that path again replaces it.
+converted to that path again replaces it. One whose chart was deleted stays
+until the user removes it; once another chart is moved or renamed to its
+path, it is no longer tied to that path.
 
 A cell's update files are named after the cell, beside it, so GDAL's S-57
 driver applies them when it opens the `.000`. Another chart claiming an id

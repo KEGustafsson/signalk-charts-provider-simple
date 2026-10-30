@@ -332,7 +332,7 @@ describe('moveChartCollection', () => {
         cells: [{ base: a }]
       })
     );
-    // Left by a chart at the new path that is gone.
+    // Left by a chart at the new path that was deleted.
     await storeCollection(
       request({
         owner: chartOwner(to),
@@ -346,7 +346,6 @@ describe('moveChartCollection', () => {
     try {
       assert.strictEqual(await moveChartCollection(from, to), true);
       assert.deepStrictEqual(heard, ['Old', 'A']);
-      assert.strictEqual(getCollection('Old'), null);
       assert.strictEqual(collectionOf(chartOwner(to)), 'A');
       assert.strictEqual(collectionOf(chartOwner(from)), null);
       assert.strictEqual(getCollection('A')?.chart, to);
@@ -354,7 +353,14 @@ describe('moveChartCollection', () => {
         getCollection('A')?.cells.map((c) => c.name),
         ['FI5AAAAA']
       );
-      assert.strictEqual(await moveChartCollection(from, to), false);
+      // The deleted chart's cells stay, tied to no chart.
+      assert.strictEqual(getCollection('Old')?.chart, undefined);
+      assert.deepStrictEqual(
+        getCollection('Old')?.cells.map((c) => c.name),
+        ['FI5BBBBB']
+      );
+      assert.strictEqual(await moveChartCollection(to, to), false);
+      assert.strictEqual(collectionOf(chartOwner(to)), 'A');
 
       // A chart converted at the old path later gets a collection of its own.
       await storeCollection(
@@ -373,6 +379,23 @@ describe('moveChartCollection', () => {
     } finally {
       unsubscribe();
     }
+  });
+
+  it('unties a collection from the path a chart without one moves to', async () => {
+    const b = makeCell(path.join(sourceDir, 'B'), 'FI5BBBBB');
+    const to = path.join('G', 'A.mbtiles');
+    await storeCollection(
+      request({
+        owner: chartOwner(to),
+        preferredId: 'Old.mbtiles',
+        chart: to,
+        cells: [{ base: b }]
+      })
+    );
+    assert.strictEqual(await moveChartCollection(path.join('F', 'A.mbtiles'), to), false);
+    assert.strictEqual(collectionOf(chartOwner(to)), null);
+    assert.strictEqual(getCollection('Old')?.chart, undefined);
+    assert.strictEqual(getCollection('Old')?.cells.length, 1);
   });
 });
 

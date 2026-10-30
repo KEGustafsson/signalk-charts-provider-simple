@@ -2347,7 +2347,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         const newRelative = path.relative(basePath, targetPath);
         renameInstallFilename(chartPathBody, newRelative);
         // The ENC cells kept for the chart, if any, follow it.
-        moveChartCollection(path.relative(basePath, sourcePath), newRelative).catch(
+        await moveChartCollection(path.relative(basePath, sourcePath), newRelative).catch(
           (err: unknown) => {
             app.debug(
               `Could not move the chart's kept ENC cells: ${err instanceof Error ? err.message : String(err)}`
@@ -2463,7 +2463,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         const newRelative = path.relative(basePath, targetPath);
         renameInstallFilename(chartPathBody, newRelative);
         // The ENC cells kept for the chart, if any, follow it.
-        moveChartCollection(path.relative(basePath, sourcePath), newRelative).catch(
+        await moveChartCollection(path.relative(basePath, sourcePath), newRelative).catch(
           (err: unknown) => {
             app.debug(
               `Could not move the chart's kept ENC cells: ${err instanceof Error ? err.message : String(err)}`
