@@ -709,7 +709,7 @@ export function chartSetOwner(setId: string): string {
   return `chart-set:${setId}`;
 }
 
-/** The owner of a converted chart's collection. */
+/** The owner of a converted chart's collection, by its path relative to the chart path. */
 export function chartOwner(chartFile: string): string {
   return `chart:${chartFile}`;
 }

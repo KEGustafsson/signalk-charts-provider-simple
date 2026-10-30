@@ -1250,7 +1250,6 @@ async function loadSharedCells(): Promise<void> {
   await Promise.all([...ccSharedOpen].map((id) => loadSharedCellList(id)));
 }
 
-// List a collection's cells under its row: name, version, update files, size.
 async function loadSharedCellList(id: string): Promise<void> {
   const el = document.querySelector<HTMLElement>(`[data-cc-cells="${CSS.escape(id)}"]`);
   if (!el) {

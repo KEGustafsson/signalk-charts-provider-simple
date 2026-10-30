@@ -4109,7 +4109,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
           const controller = new AbortController();
           conversionAborts.set(chartNumber, controller);
           res.json({ success: true, chartNumber, message: 'Conversion started' });
-          const keeper = cellKeeper('upload', undefined);
+          const keeper = cellKeeper('upload', undefined, '');
 
           try {
             if (convType === 's57') {
@@ -4269,7 +4269,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         const onStatus = (status: string, message: string): void => {
           app.debug(`Convert [${chartNumber}] ${status}: ${message}`);
         };
-        const keeper = cellKeeper('local', undefined);
+        const keeper = cellKeeper('local', undefined, '');
         try {
           if (isS57) {
             const result = await processS57Local(
@@ -4930,7 +4930,11 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
       // the same cleanup as a conversion failure.
       let quarantineDir: string | null = null;
       const displayName = chartTitle ? cleanCatalogTitle(chartTitle) : undefined;
-      const keeper = cellKeeper('catalog', displayName || undefined);
+      const keeper = cellKeeper(
+        'catalog',
+        displayName || undefined,
+        path.relative(chartPath, targetDir)
+      );
 
       try {
         quarantineDir = makeUniqueQuarantineDir(app.getDataDirPath(), chartNumber);
@@ -5357,7 +5361,8 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
   }
 
   // The S-57 cells of a converted chart, kept in the shared ENC store when
-  // `keepEncCells` is on, under the chart's file name: converting the chart
+  // `keepEncCells` is on, under the chart's path in the chart folder (it is
+  // installed in `folder`, relative to the chart path): converting the chart
   // again replaces them. They are staged while the conversion's files are
   // on disk and replace the collection only once the chart is installed, so
   // a cancelled or failed conversion leaves the collection matching the
@@ -5372,7 +5377,8 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
   }
   function cellKeeper(
     source: 'upload' | 'catalog' | 'local',
-    name: string | undefined
+    name: string | undefined,
+    folder: string
   ): CellKeeper {
     if (props.keepEncCells !== true) {
       return { keepCells: undefined, commit: () => Promise.resolve(), discard: () => {} };
@@ -5381,12 +5387,13 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     return {
       keepCells: async (cells, mbtilesFile) => {
         staged?.discard();
+        const chart = path.join(folder, mbtilesFile);
         staged = await stageCollection({
-          owner: chartOwner(mbtilesFile),
+          owner: chartOwner(chart),
           preferredId: mbtilesFile,
           name: name ?? mbtilesFile.replace(/\.mbtiles$/, ''),
           kind: 'conversion',
-          chart: mbtilesFile,
+          chart,
           source,
           cells: cells.map((base) => ({ base })),
           mode: source === 'local' ? 'copy' : 'link'
