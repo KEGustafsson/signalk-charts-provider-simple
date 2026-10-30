@@ -19,6 +19,7 @@ import {
   getCollection,
   initEncStore,
   listCollections,
+  moveChartCollection,
   onEncStoreChange,
   removeCollection,
   removeCollectionOf,
@@ -311,6 +312,64 @@ describe('removeCollection, twice at once', () => {
       const results = await Promise.all([removeCollection('Harbour'), removeCollection('Harbour')]);
       assert.deepStrictEqual(results.sort(), [false, true]);
       assert.deepStrictEqual(heard, ['Harbour']);
+    } finally {
+      unsubscribe();
+    }
+  });
+});
+
+describe('moveChartCollection', () => {
+  it('moves the collection with the chart, so its old path no longer replaces it', async () => {
+    const a = makeCell(path.join(sourceDir, 'A'), 'FI5AAAAA');
+    const b = makeCell(path.join(sourceDir, 'B'), 'FI5BBBBB');
+    const from = path.join('F', 'A.mbtiles');
+    const to = path.join('G', 'A.mbtiles');
+    await storeCollection(
+      request({
+        owner: chartOwner(from),
+        preferredId: 'A.mbtiles',
+        chart: from,
+        cells: [{ base: a }]
+      })
+    );
+    // Left by a chart at the new path that is gone.
+    await storeCollection(
+      request({
+        owner: chartOwner(to),
+        preferredId: 'Old.mbtiles',
+        chart: to,
+        cells: [{ base: b }]
+      })
+    );
+    const heard: string[] = [];
+    const unsubscribe = onEncStoreChange((id) => heard.push(id));
+    try {
+      assert.strictEqual(await moveChartCollection(from, to), true);
+      assert.deepStrictEqual(heard, ['Old', 'A']);
+      assert.strictEqual(getCollection('Old'), null);
+      assert.strictEqual(collectionOf(chartOwner(to)), 'A');
+      assert.strictEqual(collectionOf(chartOwner(from)), null);
+      assert.strictEqual(getCollection('A')?.chart, to);
+      assert.deepStrictEqual(
+        getCollection('A')?.cells.map((c) => c.name),
+        ['FI5AAAAA']
+      );
+      assert.strictEqual(await moveChartCollection(from, to), false);
+
+      // A chart converted at the old path later gets a collection of its own.
+      await storeCollection(
+        request({
+          owner: chartOwner(from),
+          preferredId: 'A.mbtiles',
+          chart: from,
+          cells: [{ base: b }]
+        })
+      );
+      assert.deepStrictEqual(
+        getCollection('A')?.cells.map((c) => c.name),
+        ['FI5AAAAA']
+      );
+      assert.strictEqual(collectionOf(chartOwner(from)), 'A-2');
     } finally {
       unsubscribe();
     }

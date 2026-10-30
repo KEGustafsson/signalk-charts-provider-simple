@@ -24,6 +24,10 @@ install. A **collection** is the cells behind one chart:
 | `chart-set` | An ENC Charts set's cells, hard linked from its cache | the set's id (`Gulf_of_Finland`) | with the set |
 | `conversion` | The cells of an ENC chart converted from an upload, a folder on the server or the Chart Catalog, when **Keep the ENC cells of converted charts** is on | the chart file's name (`US5MA1AM`) | by the user, in the ENC Charts tab |
 
+A converted chart's collection belongs to the chart's path in the chart
+folder: it follows the chart when the chart is moved or renamed, and a chart
+converted to that path again replaces it.
+
 A cell's update files are named after the cell, beside it, so GDAL's S-57
 driver applies them when it opens the `.000`. Another chart claiming an id
 already taken gets `-2`, `-3`, ….

@@ -663,6 +663,38 @@ export async function removeCollectionOf(owner: string): Promise<void> {
   }
 }
 
+/**
+ * A converted chart moved or renamed in the chart folder, from `from` to `to`
+ * (relative to the chart path): its collection follows it, so a chart
+ * converted later at the old path does not replace it. A collection left
+ * at `to` by a chart no longer there goes, as a conversion there would
+ * replace it. False when the chart has no collection.
+ */
+export async function moveChartCollection(from: string, to: string): Promise<boolean> {
+  const owner = chartOwner(from);
+  const id = collectionOf(owner);
+  if (id === null) {
+    return false;
+  }
+  const left = collectionOf(chartOwner(to));
+  if (left !== null && left !== id) {
+    await removeCollection(left);
+  }
+  const dir = collectionDir(id);
+  const moved = await serially(owner, () => {
+    const record = readRecord(dir);
+    if (record?.owner !== owner) {
+      return Promise.resolve(false);
+    }
+    writeRecord(dir, { ...record, owner: chartOwner(to), chart: to });
+    return Promise.resolve(true);
+  });
+  if (moved) {
+    emit(id);
+  }
+  return moved;
+}
+
 /** The owner of the collection of this id, or null. */
 export function collectionOwner(id: string): string | null {
   return SAFE_ID.test(id) ? (readRecord(collectionDir(id))?.owner ?? null) : null;
