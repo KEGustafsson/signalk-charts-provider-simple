@@ -53,8 +53,7 @@ Plugins in the same Signal K server use
 [`src/types.ts`](../src/types.ts). It gives the store's `root`, the
 collections with their cells, and a change listener. It is published once the
 plugin has started and withdrawn when it stops; a peer plugin that starts
-first waits for it, or reads the layout above at the default path meanwhile.
-`root` is where the store is; the default path is only that, a default.
+first waits for it, then reads the layout above under its `root`.
 
 Compatibility: `apiVersion` changes only with a change readers must know
 about, and a reader should not use an API of a version it does not know.
