@@ -16,11 +16,13 @@ import {
   collectionIdFor,
   collectionOf,
   collectionOwner,
+  collectionState,
   detachChartCollection,
   encStoreRoot,
   getCollection,
   initEncStore,
   listCollections,
+  listCollectionsWithCells,
   moveChartCollection,
   onEncStoreChange,
   removeCollection,
@@ -198,6 +200,11 @@ describe('storeCollection', () => {
       listCollections().map((c) => c.id),
       ['Harbour', 'Harbour-2']
     );
+    // The same collections with their cells, as getCollection reads each.
+    assert.deepStrictEqual(listCollectionsWithCells(), [
+      getCollection('Harbour'),
+      getCollection('Harbour-2')
+    ]);
     assert.deepStrictEqual([...chartSetCollections()], [['Harbour', 'Harbour']]);
   });
 
@@ -362,6 +369,36 @@ describe('removeCollection, twice at once', () => {
     } finally {
       unsubscribe();
     }
+  });
+});
+
+describe('collectionState', () => {
+  it('is writing while its cells are written, the first ones of a chart set too, then ready', async () => {
+    const a = makeCell(path.join(sourceDir, 'A'), 'FI5AAAAA');
+    const writing = storeCollection(
+      request({
+        owner: chartSetOwner('Gulf'),
+        preferredId: 'Gulf',
+        kind: 'chart-set',
+        cells: [{ base: a }]
+      })
+    );
+    assert.strictEqual(collectionState('Gulf'), 'writing');
+    await writing;
+    assert.strictEqual(collectionState('Gulf'), 'ready');
+    const again = storeCollection(
+      request({ owner: chartSetOwner('Gulf'), preferredId: 'Gulf', kind: 'chart-set', cells: [] })
+    );
+    assert.strictEqual(collectionState('Gulf'), 'writing');
+    await again;
+    assert.strictEqual(collectionState('Nope'), 'absent');
+    assert.strictEqual(collectionState('../x'), 'absent');
+    // A folder whose record names another id is no collection, as getCollection reads it.
+    fs.cpSync(path.join(encStoreRoot(), 'Gulf'), path.join(encStoreRoot(), 'Copy'), {
+      recursive: true
+    });
+    assert.strictEqual(getCollection('Copy'), null);
+    assert.strictEqual(collectionState('Copy'), 'absent');
   });
 });
 

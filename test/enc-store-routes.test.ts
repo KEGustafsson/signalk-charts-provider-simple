@@ -114,7 +114,15 @@ describe('ENC store routes and global', () => {
       handleMessage: () => {},
       subscriptionmanager: { subscribe: () => {}, unsubscribe: () => {} }
     } as unknown as ExtendedServerAPI;
+    // The data dir is the server's to give from start() on.
+    let started = false;
+    const getDataDirPath = app.getDataDirPath.bind(app);
+    app.getDataDirPath = () => {
+      assert.ok(started, 'the data dir is asked for before start()');
+      return getDataDirPath();
+    };
     const plugin = pluginFactory(app);
+    started = true;
     const { router, handlers } = createRouterStub();
     plugin.registerWithRouter?.(router);
     plugin.start({ chartPath }, () => {});
@@ -183,6 +191,51 @@ describe('ENC store routes and global', () => {
       );
       assert.strictEqual(outside.statusCode, 404);
 
+      // What a reader finds of a collection, and the cells reaching an area.
+      assert.ok(api.state && api.cellsIn && api.requestArea, 'the additions are published');
+      assert.deepStrictEqual(api.state('Gulf'), { state: 'ready' });
+      assert.deepStrictEqual(api.state('Nope'), { state: 'absent' });
+      const stateRes = makeRes();
+      await handlers.get('get /enc-store/:collection/state')?.(
+        { params: { collection: 'US5MA1AM' } },
+        stateRes
+      );
+      assert.deepStrictEqual(stateRes.body, { state: 'ready' });
+      // Without the ENC index no extent is known, so every cell reaches every area.
+      assert.deepStrictEqual(
+        api.cellsIn([20, 59, 21, 60]).map((c) => [c.cell, c.collection, c.version]),
+        [
+          ['FI5AAAAA', 'Gulf', 'FI5AAAAA_ED001_UP000'],
+          ['US5MA1AM', 'US5MA1AM', undefined]
+        ]
+      );
+      // A box the store cannot answer whole is refused, not answered in part.
+      for (const bad of [
+        [NaN, 59, NaN, 60],
+        [190, 59, 200, 60],
+        [20, 61, 21, 60]
+      ] as const) {
+        assert.throws(() => api.cellsIn?.(bad), TypeError);
+      }
+      const area = makeRes();
+      await handlers.get('get /enc-area')?.({ query: { bbox: '20,59,21,60' } }, area);
+      assert.strictEqual((area.body as { cells: unknown[] }).cells.length, 2);
+      const badArea = makeRes();
+      await handlers.get('get /enc-area')?.({ query: { bbox: '20,61,21,60' } }, badArea);
+      assert.strictEqual(badArea.statusCode, 400);
+      const emptyPart = makeRes();
+      await handlers.get('get /enc-area')?.({ query: { bbox: '20,,21,60' } }, emptyPart);
+      assert.strictEqual(emptyPart.statusCode, 400);
+      // Area downloads are off unless the user turns them on.
+      assert.strictEqual(api.requestArea([20, 59, 21, 60], 'test').accepted, false);
+      const ask = makeRes();
+      await handlers.get('post /enc-area')?.(
+        { body: { bbox: [20, 59, 21, 60], requester: 'test' } },
+        ask
+      );
+      assert.strictEqual(ask.statusCode, 400);
+      assert.match((ask.body as { reason: string }).reason, /turn on/);
+
       // A chart set's cells go with the set; a converted chart's on request.
       const setDelete = makeRes();
       await handlers.get('delete /enc-store/:collection')?.(
@@ -210,6 +263,12 @@ describe('ENC store routes and global', () => {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
       assert.deepStrictEqual(api.collections(), []);
+
+      // A chart set with no cells shared yet is pending.
+      const created = makeRes();
+      await handlers.get('post /custom-catalogs')?.({ body: { name: 'Archipelago' } }, created);
+      const setId = (created.body as { id: string }).id;
+      assert.deepStrictEqual(api.state(setId), { state: 'pending', detail: 'not downloaded yet' });
     } finally {
       plugin.stop?.();
       assert.strictEqual(g.__signalk_chartsProviderEnc, undefined, 'withdrawn on stop');

@@ -279,24 +279,31 @@ function toCollection(dir: string, record: CollectionRecord): EncCollection {
   return summary;
 }
 
-/** Every collection, by id. A collection still being written for the first time is left out. */
-export function listCollections(): EncCollectionSummary[] {
+/**
+ * Every collection with its cells, by id. A collection still being written for the first time
+ * is left out.
+ */
+export function listCollectionsWithCells(): EncCollection[] {
   let names: string[];
   try {
     names = fs.readdirSync(rootDir);
   } catch {
     return [];
   }
-  const result: EncCollectionSummary[] = [];
+  const result: EncCollection[] = [];
   for (const name of names.filter((n) => SAFE_ID.test(n)).sort()) {
     const dir = path.join(rootDir, name);
     const record = readRecord(dir);
     if (record?.id === name) {
-      const { cells: _cells, ...summary } = toCollection(dir, record);
-      result.push(summary);
+      result.push(toCollection(dir, record));
     }
   }
   return result;
+}
+
+/** Every collection, by id, as `listCollectionsWithCells` without the cells. */
+export function listCollections(): EncCollectionSummary[] {
+  return listCollectionsWithCells().map(({ cells: _cells, ...summary }) => summary);
 }
 
 export function getCollection(id: string): EncCollection | null {
@@ -757,6 +764,25 @@ export async function moveChartCollection(from: string, to: string): Promise<boo
     }
   }
   return moved !== null;
+}
+
+/**
+ * What a reader finds of collection `id`: `ready` to read, `writing` while
+ * its cells are written (a reader that reads them now may miss one being
+ * replaced, and hears of the collection when the write is done), or
+ * `absent`. A chart set's collection is `writing` before its first cells
+ * are in place too, its id being the set's.
+ */
+export function collectionState(id: string): 'ready' | 'writing' | 'absent' {
+  if (!SAFE_ID.test(id)) {
+    return 'absent';
+  }
+  const record = readRecord(collectionDir(id));
+  const owner = record?.id === id ? record.owner : undefined;
+  if (writing.has(owner ?? chartSetOwner(id))) {
+    return 'writing';
+  }
+  return owner === undefined ? 'absent' : 'ready';
 }
 
 /**
