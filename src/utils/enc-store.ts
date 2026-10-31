@@ -445,6 +445,32 @@ async function placeFile(from: string, to: string, mode: 'link' | 'copy'): Promi
   await fs.promises.utimes(to, st.atimeMs / 1000, st.mtimeMs / 1000);
 }
 
+/**
+ * Put back the cells a failed write changed, newest change first: a cell it
+ * placed goes, and the old copy set aside returns. The record was not yet
+ * written, so the collection is again as it was.
+ */
+function restoreCells(
+  dir: string,
+  changed: readonly { name: string; aside: string | null; placed: boolean }[]
+): void {
+  for (const { name, aside, placed } of [...changed].reverse()) {
+    const target = path.join(dir, name);
+    try {
+      if (placed) {
+        fs.rmSync(target, { recursive: true, force: true });
+      }
+      if (aside !== null) {
+        fs.renameSync(aside, target);
+      }
+    } catch (err) {
+      console.error(
+        `[charts-provider] Could not restore ENC cell ${name} in ${dir}: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+}
+
 async function writeCollection(request: StoreCollectionRequest): Promise<StoreResult> {
   const id = claimId(request.owner, request.preferredId);
   const dir = collectionDir(id);
@@ -454,6 +480,8 @@ async function writeCollection(request: StoreCollectionRequest): Promise<StoreRe
     `${WORK_PREFIX}staging-${id}-${String(Date.now())}-${String(process.pid)}`
   );
   fs.mkdirSync(work, { recursive: true });
+  // Each cell changed so far and where its old copy waits, so a failed write is undone.
+  const changed: { name: string; aside: string | null; placed: boolean }[] = [];
   try {
     const wanted = new Map<string, { files: Map<string, string>; version?: string }>();
     for (const cell of request.cells) {
@@ -475,19 +503,24 @@ async function writeCollection(request: StoreCollectionRequest): Promise<StoreRe
         await placeFile(from, path.join(built, fileName), request.mode);
       }
       // Swap it in: the old copy goes aside first, so a reader never finds half a cell.
-      const old = path.join(work, `${WORK_PREFIX}old-${name}`);
-      if (fs.existsSync(target)) {
-        fs.renameSync(target, old);
+      const change = {
+        name,
+        aside: fs.existsSync(target) ? path.join(work, `${WORK_PREFIX}old-${name}`) : null,
+        placed: false
+      };
+      changed.push(change);
+      if (change.aside !== null) {
+        fs.renameSync(target, change.aside);
       }
       fs.renameSync(built, target);
-      fs.rmSync(old, { recursive: true, force: true });
+      change.placed = true;
       result.written.push(name);
     }
     for (const name of fs.readdirSync(dir)) {
       if (SAFE_CELL.test(name) && !wanted.has(name)) {
-        const old = path.join(work, `${WORK_PREFIX}gone-${name}`);
-        fs.renameSync(path.join(dir, name), old);
-        fs.rmSync(old, { recursive: true, force: true });
+        const aside = path.join(work, `${WORK_PREFIX}gone-${name}`);
+        fs.renameSync(path.join(dir, name), aside);
+        changed.push({ name, aside, placed: false });
         result.removed.push(name);
       }
     }
@@ -515,6 +548,9 @@ async function writeCollection(request: StoreCollectionRequest): Promise<StoreRe
     }
     writeRecord(dir, record);
     return result;
+  } catch (err) {
+    restoreCells(dir, changed);
+    throw err;
   } finally {
     fs.rmSync(work, { recursive: true, force: true });
     // A first write that failed leaves no half collection behind.
@@ -721,6 +757,22 @@ export async function moveChartCollection(from: string, to: string): Promise<boo
     }
   }
   return moved !== null;
+}
+
+/**
+ * Untie the collection kept for the chart at `chart` (relative to the chart
+ * path), if any, keeping its cells: the chart installed there now is not the
+ * one they came from. False when the chart has no collection.
+ */
+export async function detachChartCollection(chart: string): Promise<boolean> {
+  const owner = chartOwner(chart);
+  const id = await serially(owner, () =>
+    Promise.resolve(retie(owner, (was) => `${DETACHED_OWNER}${was}`, undefined))
+  );
+  if (id !== null) {
+    emit(id);
+  }
+  return id !== null;
 }
 
 /** The owner of the collection of this id, or null. */

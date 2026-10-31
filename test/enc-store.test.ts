@@ -16,6 +16,7 @@ import {
   collectionIdFor,
   collectionOf,
   collectionOwner,
+  detachChartCollection,
   encStoreRoot,
   getCollection,
   initEncStore,
@@ -212,6 +213,51 @@ describe('storeCollection', () => {
       getCollection(one.id)?.cells.map((c) => c.name),
       ['FI5BBBBB']
     );
+  });
+});
+
+describe('storeCollection, failing part way', () => {
+  it('puts the cells it changed back, so the collection is as it was', async () => {
+    const a = makeCell(path.join(sourceDir, 'A1'), 'FI5AAAAA', [], 'first');
+    const b = makeCell(path.join(sourceDir, 'B'), 'FI5BBBBB');
+    const first = await storeCollection(request({ cells: [{ base: a }, { base: b }] }));
+    const before = getCollection(first.id);
+    const heard: string[] = [];
+    const unsubscribe = onEncStoreChange((id) => heard.push(id));
+    try {
+      const a2 = makeCell(path.join(sourceDir, 'A2'), 'FI5AAAAA', [], 'second');
+      // B's update cannot be read: the write fails after A is already swapped in.
+      const missing = path.join(sourceDir, 'gone', 'FI5BBBBB.001');
+      await assert.rejects(
+        storeCollection(request({ cells: [{ base: a2 }, { base: b, files: [b, missing] }] }))
+      );
+      assert.deepStrictEqual(getCollection(first.id), before);
+      const stored = getCollection(first.id)?.cells.find((c) => c.name === 'FI5AAAAA');
+      assert.strictEqual(
+        fs.readFileSync(path.join(stored?.dir ?? '', 'FI5AAAAA.000'), 'utf8'),
+        'base first'
+      );
+      assert.deepStrictEqual(heard, [], 'nothing changed, so no one is told');
+      assert.deepStrictEqual(
+        fs.readdirSync(encStoreRoot()).filter((n) => n.startsWith('.')),
+        [],
+        'no work folder is left'
+      );
+    } finally {
+      unsubscribe();
+    }
+  });
+});
+
+describe('detachChartCollection', () => {
+  it('unties the collection of a chart and keeps its cells', async () => {
+    const a = makeCell(path.join(sourceDir, 'A'), 'FI5AAAAA');
+    const { id } = await storeCollection(request({ cells: [{ base: a }] }));
+    assert.strictEqual(await detachChartCollection('Harbour.mbtiles'), true);
+    assert.strictEqual(collectionOf(chartOwner('Harbour.mbtiles')), null);
+    assert.strictEqual(getCollection(id)?.chart, undefined);
+    assert.strictEqual(getCollection(id)?.cells.length, 1);
+    assert.strictEqual(await detachChartCollection('Harbour.mbtiles'), false);
   });
 });
 
