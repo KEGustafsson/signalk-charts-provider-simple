@@ -123,7 +123,7 @@ The interface provides seven tabs:
 
 ### Shared ENC cells for other plugins
 
-The plugin keeps S-57 cells as delivered, `.000` with its `.001`, `.002`, … updates, in one place other Signal K plugins read from: the `enc-store` folder in the plugin's data directory, by default `~/.signalk/plugin-config-data/signalk-charts-provider-simple/enc-store/`. Integrations take its location from the API's `root`. Each chart's cells form a **collection**, one folder per cell:
+The plugin keeps S-57 cells as delivered, `.000` with its `.001`, `.002`, … updates, in one place other Signal K plugins read from: the `enc-store` folder in the plugin's data directory. Integrations take its location from the API's `root`. Each chart's cells form a **collection**, one folder per cell:
 
 ```
 enc-store/<collection>/<CELL>/<CELL>.000, <CELL>.001, …

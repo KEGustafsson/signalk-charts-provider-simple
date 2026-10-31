@@ -1296,13 +1296,30 @@ async function loadSharedCellList(id: string): Promise<void> {
     .join('');
 }
 
+// Opens or closes one collection's cells; only an opened one is fetched, not the whole store.
 function toggleSharedCells(id: string): void {
-  if (ccSharedOpen.has(id)) {
-    ccSharedOpen.delete(id);
-  } else {
+  const open = !ccSharedOpen.has(id);
+  if (open) {
     ccSharedOpen.add(id);
+  } else {
+    ccSharedOpen.delete(id);
   }
-  void loadSharedCells();
+  const key = CSS.escape(id);
+  const button = document.querySelector<HTMLElement>(
+    `[data-cc-action="shared-toggle"][data-cc-collection="${key}"]`
+  );
+  const list = document.querySelector<HTMLElement>(`[data-cc-cells="${key}"]`);
+  if (!button || !list) {
+    void loadSharedCells();
+    return;
+  }
+  button.setAttribute('aria-expanded', open ? 'true' : 'false');
+  button.title = `${open ? 'Hide' : 'List'} its cells`;
+  button.textContent = open ? '▾' : '▸';
+  list.hidden = !open;
+  if (open) {
+    void loadSharedCellList(id);
+  }
 }
 
 async function removeSharedCells(id: string): Promise<void> {

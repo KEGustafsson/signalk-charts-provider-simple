@@ -15,9 +15,9 @@ instead of asking for them again.
     <CELL>/<CELL>.001 …
 ```
 
-`<dataDir>` is the plugin's data folder,
-`~/.signalk/plugin-config-data/signalk-charts-provider-simple` on a default
-install. A **collection** is the cells behind one chart:
+`<dataDir>` is the data directory Signal K gives the plugin; readers take the
+store's location from the API's `root` rather than building it. A
+**collection** is the cells behind one chart:
 
 | Kind | What it holds | Id | Removed |
 | --- | --- | --- | --- |

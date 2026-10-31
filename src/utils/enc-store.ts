@@ -674,34 +674,27 @@ export async function removeCollectionOf(owner: string): Promise<void> {
 
 /**
  * Give the collection `owner` wrote, if any, the owner `next(id)` and that
- * chart, after the owner's earlier writes. Its id when it changed.
+ * chart. Its id when it changed. Run inside the owner's turn to write.
  */
-async function reassign(
+function retie(
   owner: string,
   next: (id: string) => string,
   chart: string | undefined
-): Promise<string | null> {
+): string | null {
   const id = collectionOf(owner);
   if (id === null) {
     return null;
   }
   const dir = collectionDir(id);
-  const done = await serially(owner, () => {
-    const record = readRecord(dir);
-    if (record?.owner !== owner) {
-      return Promise.resolve(false);
-    }
-    const { chart: _was, ...rest } = record;
-    writeRecord(
-      dir,
-      chart === undefined ? { ...rest, owner: next(id) } : { ...rest, owner: next(id), chart }
-    );
-    return Promise.resolve(true);
-  });
-  if (!done) {
+  const record = readRecord(dir);
+  if (record?.owner !== owner) {
     return null;
   }
-  emit(id);
+  const { chart: _was, ...rest } = record;
+  writeRecord(
+    dir,
+    chart === undefined ? { ...rest, owner: next(id) } : { ...rest, owner: next(id), chart }
+  );
   return id;
 }
 
@@ -712,13 +705,29 @@ async function reassign(
  * tied to `to` belongs to a chart no longer there: it keeps its cells, which
  * readers may be using, until the user removes them, but is no longer tied
  * to that path. False when the chart has no collection.
+ *
+ * Both owners' writes wait for the whole move, so a conversion committing
+ * its cells for `to` meanwhile comes before or after it, never between.
  */
 export async function moveChartCollection(from: string, to: string): Promise<boolean> {
   if (from === to) {
     return false;
   }
-  await reassign(chartOwner(to), (id) => `${DETACHED_OWNER}${id}`, undefined);
-  return (await reassign(chartOwner(from), () => chartOwner(to), to)) !== null;
+  const [first, second] = [chartOwner(from), chartOwner(to)].sort();
+  const [detached, moved] = await serially(first, () =>
+    serially(second, () =>
+      Promise.resolve([
+        retie(chartOwner(to), (id) => `${DETACHED_OWNER}${id}`, undefined),
+        retie(chartOwner(from), () => chartOwner(to), to)
+      ])
+    )
+  );
+  for (const id of [detached, moved]) {
+    if (id !== null) {
+      emit(id);
+    }
+  }
+  return moved !== null;
 }
 
 /**
