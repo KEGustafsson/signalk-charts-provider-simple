@@ -15,6 +15,7 @@ import {
   chartSetOwner,
   collectionIdFor,
   collectionOf,
+  collectionOwner,
   encStoreRoot,
   getCollection,
   initEncStore,
@@ -379,6 +380,22 @@ describe('moveChartCollection', () => {
     } finally {
       unsubscribe();
     }
+  });
+
+  it('runs a move and a commit for its destination one after the other', async () => {
+    const a = makeCell(path.join(sourceDir, 'A'), 'FI5AAAAA');
+    const b = makeCell(path.join(sourceDir, 'B'), 'FI5BBBBB');
+    const owner = (chart: string) => ({ owner: chartOwner(chart), preferredId: chart, chart });
+    await storeCollection(request({ ...owner('A.mbtiles'), cells: [{ base: a }] }));
+    const staged = await stageCollection(request({ ...owner('B.mbtiles'), cells: [{ base: b }] }));
+    // A conversion installs B.mbtiles while A.mbtiles is moved there.
+    await Promise.all([moveChartCollection('A.mbtiles', 'B.mbtiles'), staged.commit()]);
+    const owners = listCollections().map((c) => collectionOwner(c.id));
+    assert.strictEqual(
+      owners.filter((o) => o === chartOwner('B.mbtiles')).length,
+      1,
+      'one collection belongs to the chart at B.mbtiles'
+    );
   });
 
   it('unties a collection from the path a chart without one moves to', async () => {
