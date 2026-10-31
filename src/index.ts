@@ -618,6 +618,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
       setCatalogChangedListener(null);
       internet?.stop();
       internet = null;
+      resetAreaRequests();
       onlineTimeActive = false;
       timePoller.stop();
       if (catalogUpdateInterval) {
@@ -4632,7 +4633,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     // The stored cells reaching an area: ?bbox=west,south,east,north.
     router.get('/enc-area', (req: Request, res: Response) => {
       const raw = typeof req.query.bbox === 'string' ? req.query.bbox.split(',') : [];
-      const bbox = raw.map(Number);
+      const bbox = raw.map((part) => (part.trim() === '' ? NaN : Number(part)));
       if (
         bbox.length !== 4 ||
         !bbox.every(Number.isFinite) ||
@@ -5527,7 +5528,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     return cellsIn(collections, bbox, index ? (extentsOf?.extents ?? new Map()) : new Map());
   }
 
-  const requestArea = createAreaRequester({
+  const { request: requestArea, reset: resetAreaRequests } = createAreaRequester({
     enabled: () => props.encAreaDownloads === true,
     index: getEncIndex,
     refreshIndex: refreshEncIndexIfStale,
