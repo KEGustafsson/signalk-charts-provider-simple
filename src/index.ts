@@ -196,6 +196,7 @@ import {
   chartSetOwner,
   collectionOwner,
   collectionState,
+  detachChartCollection,
   ENC_STORE_API_VERSION,
   encStoreRoot,
   getCollection,
@@ -2363,7 +2364,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
           await fs.promises.mkdir(targetDir, { recursive: true });
         }
 
-        await fs.promises.rename(sourcePath, targetPath);
+        await moveChartWithCells(basePath, sourcePath, targetPath);
         app.debug(`Moved chart from ${sourcePath} to ${targetPath}`);
 
         // Update any catalog-install record that points at the old
@@ -2371,14 +2372,6 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         // badge by reverse-lookup.
         const newRelative = path.relative(basePath, targetPath);
         renameInstallFilename(chartPathBody, newRelative);
-        // The ENC cells kept for the chart, if any, follow it.
-        await moveChartCollection(path.relative(basePath, sourcePath), newRelative).catch(
-          (err: unknown) => {
-            app.debug(
-              `Could not move the chart's kept ENC cells: ${err instanceof Error ? err.message : String(err)}`
-            );
-          }
-        );
 
         await refreshChartProviders();
 
@@ -2459,7 +2452,7 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
           return;
         }
 
-        await fs.promises.rename(sourcePath, targetPath);
+        await moveChartWithCells(basePath, sourcePath, targetPath);
         app.debug(`Renamed chart from ${sourcePath} to ${targetPath}`);
 
         // Patch the MBTiles `metadata.name` row to match the new label
@@ -2487,14 +2480,6 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
         // badge by reverse-lookup.
         const newRelative = path.relative(basePath, targetPath);
         renameInstallFilename(chartPathBody, newRelative);
-        // The ENC cells kept for the chart, if any, follow it.
-        await moveChartCollection(path.relative(basePath, sourcePath), newRelative).catch(
-          (err: unknown) => {
-            app.debug(
-              `Could not move the chart's kept ENC cells: ${err instanceof Error ? err.message : String(err)}`
-            );
-          }
-        );
 
         await refreshChartProviders();
 
@@ -5443,6 +5428,29 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
     /** When the conversion ends any other way. */
     discard: () => void;
   }
+  // Moves a chart file and the ENC cells kept for it together. The cells go first, so a
+  // failure to move them leaves both where they were; when the file then cannot move, the
+  // cells move back with it, and the route answers the error either way.
+  async function moveChartWithCells(
+    basePath: string,
+    sourcePath: string,
+    targetPath: string
+  ): Promise<void> {
+    const from = path.relative(basePath, sourcePath);
+    const to = path.relative(basePath, targetPath);
+    await moveChartCollection(from, to);
+    try {
+      await fs.promises.rename(sourcePath, targetPath);
+    } catch (err) {
+      await moveChartCollection(to, from).catch((back: unknown) => {
+        app.error(
+          `Could not move the kept ENC cells of ${to} back: ${back instanceof Error ? back.message : String(back)}`
+        );
+      });
+      throw err;
+    }
+  }
+
   function cellKeeper(
     source: 'upload' | 'catalog' | 'local',
     name: string | undefined,
@@ -5452,10 +5460,23 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
       return { keepCells: undefined, commit: () => Promise.resolve(), discard: () => {} };
     }
     let staged: StagedCollection | null = null;
+    // The chart whose cells could not be kept: its earlier collection is untied once it is installed.
+    let unkept: string | null = null;
+    let stagedFor = '';
+    // A collection that no longer matches the installed chart is untied, its cells kept.
+    const untie = async (chart: string): Promise<void> => {
+      await detachChartCollection(chart).catch((err: unknown) => {
+        app.error(
+          `Could not untie the old ENC cells of ${chart}: ${err instanceof Error ? err.message : String(err)}`
+        );
+      });
+    };
     return {
       keepCells: async (cells, mbtilesFile) => {
         staged?.discard();
+        staged = null;
         const chart = path.join(folder, mbtilesFile);
+        unkept = chart;
         staged = await stageCollection({
           owner: chartOwner(chart),
           preferredId: mbtilesFile,
@@ -5466,12 +5487,19 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
           cells: cells.map((base) => ({ base })),
           mode: source === 'local' ? 'copy' : 'link'
         });
+        stagedFor = chart;
+        unkept = null;
         return `Keeping ${String(staged.staged)} ENC cell(s) for other plugins once the chart is installed`;
       },
       commit: async () => {
         const pending = staged;
+        const failed = unkept;
         staged = null;
+        unkept = null;
         if (pending === null) {
+          if (failed !== null) {
+            await untie(failed);
+          }
           return;
         }
         try {
@@ -5481,11 +5509,13 @@ const pluginConstructor = (app: ExtendedServerAPI): Plugin => {
           app.error(
             `Could not keep the ENC cells: ${err instanceof Error ? err.message : String(err)}`
           );
+          await untie(stagedFor);
         }
       },
       discard: () => {
         staged?.discard();
         staged = null;
+        unkept = null;
       }
     };
   }

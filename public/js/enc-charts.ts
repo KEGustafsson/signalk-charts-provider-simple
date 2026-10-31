@@ -1250,11 +1250,17 @@ async function loadSharedCells(): Promise<void> {
   await Promise.all([...ccSharedOpen].map((id) => loadSharedCellList(id)));
 }
 
+// The latest cell list request of each collection: an older answer is dropped.
+const ccSharedCellLoads = new Map<string, number>();
+
 async function loadSharedCellList(id: string): Promise<void> {
   const el = document.querySelector<HTMLElement>(`[data-cc-cells="${CSS.escape(id)}"]`);
   if (!el) {
     return;
   }
+  const load = (ccSharedCellLoads.get(id) ?? 0) + 1;
+  ccSharedCellLoads.set(id, load);
+  const current = (): boolean => ccSharedCellLoads.get(id) === load;
   el.innerHTML = `<div class="cc-detail-date">Loading cells…</div>`;
   let cells: EncStoreCell[];
   try {
@@ -1264,7 +1270,12 @@ async function loadSharedCellList(id: string): Promise<void> {
     }
     cells = ((await resp.json()) as { cells: EncStoreCell[] }).cells;
   } catch {
-    el.innerHTML = `<div class="cc-detail-date">Could not read the cells.</div>`;
+    if (current()) {
+      el.innerHTML = `<div class="cc-detail-date">Could not read the cells.</div>`;
+    }
+    return;
+  }
+  if (!current()) {
     return;
   }
   if (cells.length === 0) {
