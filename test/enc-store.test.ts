@@ -391,7 +391,7 @@ describe('moveChartCollection', () => {
     const heard: string[] = [];
     const unsubscribe = onEncStoreChange((id) => heard.push(id));
     try {
-      assert.strictEqual(await moveChartCollection(from, to), true);
+      assert.strictEqual((await moveChartCollection(from, to)).moved, true);
       assert.deepStrictEqual(heard, ['Old', 'A']);
       assert.strictEqual(collectionOf(chartOwner(to)), 'A');
       assert.strictEqual(collectionOf(chartOwner(from)), null);
@@ -406,7 +406,7 @@ describe('moveChartCollection', () => {
         getCollection('Old')?.cells.map((c) => c.name),
         ['FI5BBBBB']
       );
-      assert.strictEqual(await moveChartCollection(to, to), false);
+      assert.strictEqual((await moveChartCollection(to, to)).moved, false);
       assert.strictEqual(collectionOf(chartOwner(to)), 'A');
 
       // A chart converted at the old path later gets a collection of its own.
@@ -455,10 +455,48 @@ describe('moveChartCollection', () => {
         cells: [{ base: b }]
       })
     );
-    assert.strictEqual(await moveChartCollection(path.join('F', 'A.mbtiles'), to), false);
+    assert.strictEqual((await moveChartCollection(path.join('F', 'A.mbtiles'), to)).moved, false);
     assert.strictEqual(collectionOf(chartOwner(to)), null);
     assert.strictEqual(getCollection('Old')?.chart, undefined);
     assert.strictEqual(getCollection('Old')?.cells.length, 1);
+  });
+
+  it('undoes a move, tying both collections to their paths again', async () => {
+    const a = makeCell(path.join(sourceDir, 'A'), 'FI5AAAAA');
+    const b = makeCell(path.join(sourceDir, 'B'), 'FI5BBBBB');
+    const from = path.join('F', 'A.mbtiles');
+    const to = path.join('G', 'A.mbtiles');
+    await storeCollection(
+      request({
+        owner: chartOwner(from),
+        preferredId: 'A.mbtiles',
+        chart: from,
+        cells: [{ base: a }]
+      })
+    );
+    // Left by a chart at the new path that was deleted.
+    await storeCollection(
+      request({
+        owner: chartOwner(to),
+        preferredId: 'Old.mbtiles',
+        chart: to,
+        cells: [{ base: b }]
+      })
+    );
+    const move = await moveChartCollection(from, to);
+    assert.strictEqual(move.moved, true);
+    const heard: string[] = [];
+    const unsubscribe = onEncStoreChange((id) => heard.push(id));
+    try {
+      await move.undo();
+      assert.deepStrictEqual(heard.sort(), ['A', 'Old']);
+    } finally {
+      unsubscribe();
+    }
+    assert.strictEqual(collectionOf(chartOwner(from)), 'A');
+    assert.strictEqual(getCollection('A')?.chart, from);
+    assert.strictEqual(collectionOf(chartOwner(to)), 'Old');
+    assert.strictEqual(getCollection('Old')?.chart, to);
   });
 });
 

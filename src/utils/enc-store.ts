@@ -727,36 +727,69 @@ function retie(
   return id;
 }
 
+/** A chart's collection move, and the way to undo it. */
+export interface ChartCollectionMove {
+  /** Whether the chart had a collection, which now belongs to its new path. */
+  moved: boolean;
+  /**
+   * Put both collections back as they were: the moved one with the old path,
+   * and the one untied from the new path tied to it again. For a chart file
+   * that could not move after all.
+   */
+  undo: () => Promise<void>;
+}
+
+/** Run `fn` inside the turns to write of both owners, taken in a fixed order. */
+function inBothTurns<T>(a: string, b: string, fn: () => T): Promise<T> {
+  const [first, second] = [a, b].sort();
+  return serially(first, () => serially(second, () => Promise.resolve(fn())));
+}
+
+function emitEach(ids: (string | null)[]): void {
+  for (const id of ids) {
+    if (id !== null) {
+      emit(id);
+    }
+  }
+}
+
 /**
  * A chart moved or renamed in the chart folder, from `from` to `to` (relative
  * to the chart path). Its collection, if any, follows it, so a chart
  * converted later at the old path does not replace it. A collection still
  * tied to `to` belongs to a chart no longer there: it keeps its cells, which
  * readers may be using, until the user removes them, but is no longer tied
- * to that path. False when the chart has no collection.
+ * to that path.
  *
  * Both owners' writes wait for the whole move, so a conversion committing
  * its cells for `to` meanwhile comes before or after it, never between.
  */
-export async function moveChartCollection(from: string, to: string): Promise<boolean> {
+export async function moveChartCollection(from: string, to: string): Promise<ChartCollectionMove> {
   if (from === to) {
-    return false;
+    return { moved: false, undo: () => Promise.resolve() };
   }
-  const [first, second] = [chartOwner(from), chartOwner(to)].sort();
-  const [detached, moved] = await serially(first, () =>
-    serially(second, () =>
-      Promise.resolve([
-        retie(chartOwner(to), (id) => `${DETACHED_OWNER}${id}`, undefined),
-        retie(chartOwner(from), () => chartOwner(to), to)
-      ])
-    )
-  );
-  for (const id of [detached, moved]) {
-    if (id !== null) {
-      emit(id);
-    }
-  }
-  return moved !== null;
+  const [detached, moved] = await inBothTurns(chartOwner(from), chartOwner(to), () => [
+    retie(chartOwner(to), (id) => `${DETACHED_OWNER}${id}`, undefined),
+    retie(chartOwner(from), () => chartOwner(to), to)
+  ]);
+  emitEach([detached, moved]);
+  const undo = async (): Promise<void> => {
+    // Only what the move itself changed goes back: a collection another write gave
+    // `to` since then stays, and the untied one is tied again only while `to` has none.
+    const restored = await inBothTurns(chartOwner(from), chartOwner(to), () => {
+      const back =
+        moved !== null && collectionOf(chartOwner(to)) === moved
+          ? retie(chartOwner(to), () => chartOwner(from), from)
+          : null;
+      const retied =
+        detached !== null && collectionOf(chartOwner(to)) === null
+          ? retie(`${DETACHED_OWNER}${detached}`, () => chartOwner(to), to)
+          : null;
+      return [back, retied];
+    });
+    emitEach(restored);
+  };
+  return { moved: moved !== null, undo };
 }
 
 /**
