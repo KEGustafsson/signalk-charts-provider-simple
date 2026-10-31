@@ -66,6 +66,13 @@ test.describe('ENC Charts tab: shared ENC cells', () => {
       '[data-cc-action="shared-toggle"][data-cc-collection="Gulf_of_Finland"]'
     );
     await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    // Opening and closing a collection reads only its cells, not the whole store again.
+    const storeReads: string[] = [];
+    page.on('request', (r) => {
+      if (new URL(r.url()).pathname.endsWith('/enc-store')) {
+        storeReads.push(r.url());
+      }
+    });
     await toggle.click();
     const list = panel.locator('[data-cc-cells="Gulf_of_Finland"]');
     await expect(list.locator('.cc-shared-cell')).toHaveCount(2);
@@ -83,6 +90,7 @@ test.describe('ENC Charts tab: shared ENC cells', () => {
       .locator('[data-cc-action="shared-toggle"][data-cc-collection="Gulf_of_Finland"]')
       .click();
     await expect(panel.locator('[data-cc-cells="Gulf_of_Finland"]')).toBeHidden();
+    expect(storeReads).toEqual([]);
   });
 
   test('removes a converted chart’s cells after confirming', async ({ page }) => {
