@@ -144,6 +144,12 @@ enc-store/<collection>/<CELL>/<CELL>.000, <CELL>.001, …
 
 **ENC around the vessel.** With **Download the ENC cells around the vessel** on (off by default), a plugin can ask for the cells of the area the vessel is in: Under-Keel Awareness does when its **Ask Charts Provider for the ENC around the vessel** is on. The free ENC units reaching that area from the ENC index are added to one chart set, **Around the vessel**, which is downloaded and converted like any other, so its cells are shared and its chart is served. The set only grows along the voyage; edit or delete it in the ENC Charts tab. On a metered, offline or captive connection (see signalk-internet) the download waits until the connection allows.
 
+### Local WFS proxy for other plugins
+
+Other plugins on the server read the Traficom depth WFS through this plugin instead of straight from Traficom: [Under-Keel Awareness](https://www.npmjs.com/package/signalk-underkeel) does for its chart box, depth survey and planning boxes. Each area is downloaded once, kept in the `wfs-cache` folder of the plugin's data directory, and read from there the next time, so a second plan of a long trip skips the minutes of download. An area is downloaded again once it is older than **Download a kept WFS area again after** (30 days by default); on a metered, offline or captive connection the kept copy is read whatever its age.
+
+The proxy listens on this machine alone (127.0.0.1), on a path only this server's plugins learn, so it needs no Signal K login and serves no one else. It is on by default (**Keep the WFS data other plugins read**); turned off, plugins read the WFS directly. It proxies Traficom's WFS services, and any other listed in **Other WFS servers to keep**. How it answers, and the in-process API, are in [`docs/wfs-proxy.md`](docs/wfs-proxy.md). Delete the `wfs-cache` folder to drop what it keeps.
+
 ### Supported Formats
 
 | Format | Source | Conversion | Output |
