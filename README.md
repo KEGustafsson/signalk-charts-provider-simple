@@ -152,6 +152,12 @@ Other plugins read the tiles of the charts served here in-process, through the `
 
 For plugin developers: follow the `chartTiles` PropertyValue and take the latest value of each setter. It is a `ChartTiles`, whose contract is in the package's `dist/types.d.ts`: `getTile` gives a tile's body as the tile route serves it. Online charts, and a Multihelm master's charts listed without a copy, are not read this way.
 
+### Local WFS proxy for other plugins
+
+Other plugins on the server read the Traficom depth WFS through this plugin instead of straight from Traficom: [Under-Keel Awareness](https://www.npmjs.com/package/signalk-underkeel) does for its chart box, depth survey and planning boxes. Each area is downloaded once, kept in the `wfs-cache` folder of the plugin's data directory, and read from there the next time, so a second plan of a long trip skips the minutes of download. An area is downloaded once more when it is older than **Download a kept WFS area again after**; on a metered, offline or captive connection the kept copy is read whatever its age.
+
+The proxy listens on this machine alone (127.0.0.1), on a path only this server's plugins learn, so it needs no Signal K login and serves no one else. It is on by default (**Keep the WFS data other plugins read**); turned off, plugins read the WFS directly. It proxies Traficom's WFS services, and any other listed in **Other WFS servers to keep**, whose areas are read from the store only when the same box is asked for again. How it answers, and the in-process API, are in [`docs/wfs-proxy.md`](docs/wfs-proxy.md). To drop what it keeps, stop Signal K and wait for it to exit, delete the `wfs-cache` folder, then start Signal K again: a stopped plugin's proxy serves on for a while for a restart to take it over, and keeps its database open until it closes, so a folder deleted under it is still read and written.
+
 ### Supported Formats
 
 | Format | Source | Conversion | Output |
